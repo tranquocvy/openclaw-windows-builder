@@ -1,4 +1,4 @@
-name: OpenClaw Windows quarantined builder (execution locked)
+name: OpenClaw Windows quarantined builder (manual)
 'on':
   workflow_dispatch:
 
@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ false }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.run_attempt == 1 }}
     runs-on: windows-2025
     timeout-minutes: 60
     defaults:
@@ -25,10 +25,16 @@ jobs:
           RUN_ATTEMPT: ${{ github.run_attempt }}
           EVENT_NAME: ${{ github.event_name }}
           ACTUAL_REF: ${{ github.ref }}
+          HOSTED_KIND: ${{ runner.environment }}
+          HOSTED_ARCH: ${{ runner.arch }}
+          HOSTED_OS: ${{ runner.os }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
         run: |
           if ($env:ACTUAL_REPOSITORY -ne $env:EXPECTED_REPOSITORY -or
               $env:RUN_ATTEMPT -ne '1' -or $env:EVENT_NAME -ne 'workflow_dispatch' -or
-              $env:ACTUAL_REF -ne 'refs/heads/main') {
+              $env:ACTUAL_REF -ne 'refs/heads/main' -or
+              $env:HOSTED_KIND -cne 'github-hosted' -or $env:HOSTED_OS -cne 'Windows' -or
+              $env:HOSTED_ARCH -cne 'X64' -or $env:REPO_PRIVATE -cne 'false') {
             throw 'Repository/event/attempt not admitted'
           }
 
@@ -58,11 +64,37 @@ jobs:
           EXPECTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
           EXPECTED_RUN_ID: ${{ github.run_id }}
         run: |
+          function Assert-BuilderControls {
+            $expected = @('.gitattributes','.github/workflows/build-windows.yml','.gitignore','policy/artifact-policy.json','README.md','scripts/Build.ps1','scripts/test_candidate.py')
+            $rows = @(Get-Content -LiteralPath ./PUBLIC_MANIFEST.sha256)
+            if ($rows.Count -ne 7) { throw 'Builder manifest inventory' }
+            $seen = @()
+            foreach ($row in $rows) {
+              if ($row -cnotmatch '^([0-9a-f]{64})  (.+)$') { throw 'Builder manifest syntax' }
+              $digest = $Matches[1]; $path = $Matches[2]
+              if ($expected -cnotcontains $path -or $seen -ccontains $path) { throw 'Builder manifest path' }
+              $seen += $path
+              if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $digest) { throw 'Builder controls changed' }
+            }
+          }
+          Assert-BuilderControls
           $python = (Get-Command python.exe -CommandType Application).Source
           & $python -I -B ./scripts/test_candidate.py --archive "$env:RUNNER_TEMP/cpa-export/openclaw-windows-candidate.zip" --checksums "$env:RUNNER_TEMP/cpa-export/SHA256SUMS" --policy ./policy/artifact-policy.json --report "$env:RUNNER_TEMP/cpa-export/gate-report.json" --workflow-sha $env:EXPECTED_WORKFLOW_SHA --run-id $env:EXPECTED_RUN_ID
           if ($LASTEXITCODE -ne 0) { throw 'Candidate gate failed; no upload' }
           $export = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/cpa-export" -File -Force)
           if ($export.Count -ne 3 -or ($export | Measure-Object Length -Sum).Sum -gt 250MB) { throw 'Total upload cap' }
+          function Assert-QuarantineBinding {
+            $report = Get-Content -LiteralPath "$env:RUNNER_TEMP/cpa-export/gate-report.json" -Raw | ConvertFrom-Json
+            $digest = (Get-FileHash -LiteralPath "$env:RUNNER_TEMP/cpa-export/openclaw-windows-candidate.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($report.archiveSha256 -cne $digest -or $report.status -cne 'QUARANTINED_CANDIDATE' -or
+                $report.screening -cne 'CONSISTENCY_CHECK_PASS' -or $report.hostExecution -cne $false -or
+                $report.independentSecurityBoundary -cne $false -or $report.runtimeQualification -cne 'UNRUN' -or
+                $report.source -cne 'aedd9f3f56585d92ed14947df8c84ef6354f64cc' -or
+                $report.workflowSha -cne $env:EXPECTED_WORKFLOW_SHA -or $report.runId -cne $env:EXPECTED_RUN_ID) {
+              throw 'Quarantine receipt binding changed'
+            }
+          }
+          Assert-QuarantineBinding
 
       - name: Upload quarantined candidate only after gate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2, official tag verified

@@ -1,6 +1,6 @@
 # Pinned OpenClaw Windows builder
 
-Dedicated public-source-only GitHub Actions builder. **Execution is locked.**
+Dedicated public-source-only GitHub Actions builder. **Each execution requires explicit owner approval.**
 This is a preparation bundle, not an OpenClaw runtime distribution.
 
 Inputs: OpenClaw commit `aedd9f3f56585d92ed14947df8c84ef6354f64cc`,
@@ -14,7 +14,7 @@ It excludes itself to avoid a circular hash. Copy only listed files plus that
 manifest into a new checkout; never publish a parent directory or its history.
 
 The [workflow](.github/workflows/build-windows.yml) permits only manual dispatch,
-has a literal false job gate, exact action SHAs, read-only contents permission,
+has an event/main/first-attempt admission gate, exact action SHAs, read-only contents permission,
 one standard windows-2025 job, maximum60min, no cache/auto-retry, artifact≤250MiB
 and retention1day. Attempt1 guard/concurrency do not cap all fresh dispatches.
 Do not enable or dispatch until the owner approves the exact revision,
