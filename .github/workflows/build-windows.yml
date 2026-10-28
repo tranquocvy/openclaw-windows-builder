@@ -1,0 +1,80 @@
+name: OpenClaw Windows quarantined builder (execution locked)
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: openclaw-windows-single-lane
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ false }}
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check dedicated public repository and first attempt
+        timeout-minutes: 1
+        env:
+          EXPECTED_REPOSITORY: tranquocvy/openclaw-windows-builder
+          ACTUAL_REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTUAL_REF: ${{ github.ref }}
+        run: |
+          if ($env:ACTUAL_REPOSITORY -ne $env:EXPECTED_REPOSITORY -or
+              $env:RUN_ATTEMPT -ne '1' -or $env:EVENT_NAME -ne 'workflow_dispatch' -or
+              $env:ACTUAL_REF -ne 'refs/heads/main') {
+            throw 'Repository/event/attempt not admitted'
+          }
+
+      - name: Checkout public builder controls only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2, official tag verified
+        timeout-minutes: 2
+        with:
+          repository: tranquocvy/openclaw-windows-builder
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+          lfs: false
+
+      - name: Build pinned public source; never invoke Gateway or models
+        timeout-minutes: 49
+        env:
+          CPA_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CPA_RUN_ID: ${{ github.run_id }}
+          CPA_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          & ./scripts/Build.ps1
+
+      - name: Non-executing candidate gate on this runner (not independent)
+        timeout-minutes: 5
+        env:
+          EXPECTED_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+        run: |
+          $python = (Get-Command python.exe -CommandType Application).Source
+          & $python -I -B ./scripts/test_candidate.py --archive "$env:RUNNER_TEMP/cpa-export/openclaw-windows-candidate.zip" --checksums "$env:RUNNER_TEMP/cpa-export/SHA256SUMS" --policy ./policy/artifact-policy.json --report "$env:RUNNER_TEMP/cpa-export/gate-report.json" --workflow-sha $env:EXPECTED_WORKFLOW_SHA --run-id $env:EXPECTED_RUN_ID
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate gate failed; no upload' }
+          $export = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/cpa-export" -File -Force)
+          if ($export.Count -ne 3 -or ($export | Measure-Object Length -Sum).Sum -gt 250MB) { throw 'Total upload cap' }
+
+      - name: Upload quarantined candidate only after gate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2, official tag verified
+        timeout-minutes: 3
+        with:
+          name: openclaw-windows-quarantined-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/cpa-export/openclaw-windows-candidate.zip
+            ${{ runner.temp }}/cpa-export/SHA256SUMS
+            ${{ runner.temp }}/cpa-export/gate-report.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false

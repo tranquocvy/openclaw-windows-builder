@@ -1,0 +1,189 @@
+{
+  "schema": 1,
+  "source": "aedd9f3f56585d92ed14947df8c84ef6354f64cc",
+  "sourceTree": "4a03e85758ce6e57f50998beb19399100db1cada",
+  "maxCompressedBytes": 262144000,
+  "maxExpandedBytes": 1073741824,
+  "maxEntries": 200000,
+  "maxFileBytes": 134217728,
+  "nodeExeSha256": "d702daa815eabbff763c7d3808e235cf031cf2ca70211b56847bc72f51e240e5",
+  "nativeOwners": [
+    {
+      "package": "@anthropic-ai/claude-agent-sdk-win32-x64@0.3.309",
+      "integrity": "sha512-otGHQimz6F++6SajGqSAKBclRPGTn60cx+8u3dnhMa5yovKZ5SgChFgstFsiDIWr/ZBqpJysvFemSgHX61mlmQ==",
+      "pnpmPrefix": "@anthropic-ai+claude-agent-sdk-win32-x64@0.3.309"
+    },
+    {
+      "package": "@esbuild/win32-x64@0.28.2",
+      "integrity": "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g==",
+      "pnpmPrefix": "@esbuild+win32-x64@0.28.2"
+    },
+    {
+      "package": "@github/copilot-sdk-win32-x64@1.0.23",
+      "integrity": "sha512-pvzfLmvf5GmH4bXinUaLUWixIsGxjRDqEBYORsai4MrYUPGhF0KQ2z4jXYTDifIcVkQ2f5nPvn6SFCugZlvEsQ==",
+      "pnpmPrefix": "@github+copilot-sdk-win32-x64@1.0.23"
+    },
+    {
+      "package": "@koromix/koffi-win32-x64@3.2.1",
+      "integrity": "sha512-ZmZNiBO6bkOSh3QNzgfvb1cMY0yMobn6ZQrSMqbAce21qyYL8niIbyipz9N/PIRDciGhsV0wUxnZsxIO+yWsHQ==",
+      "pnpmPrefix": "@koromix+koffi-win32-x64@3.2.1"
+    },
+    {
+      "package": "@koromix/koffi-win32-x64@3.3.3",
+      "integrity": "sha512-tLTF17wl4CCwOlo1Tt0NbduwUduDvM6c8JSyearcLu6hpNHQo44RF3rKN2i7UkxwCqXyiudZK0lS421CC/TPZA==",
+      "pnpmPrefix": "@koromix+koffi-win32-x64@3.3.3"
+    },
+    {
+      "package": "@lancedb/lancedb-win32-x64-msvc@0.40.0",
+      "integrity": "sha512-DZxho/MhnGJCQc98CN3yY8qWlDCATLTjGUNqD58Fx1sNMctmkbdAf4F1fTRahz0aojfnM9aoUNaSXdY0qaPhbQ==",
+      "pnpmPrefix": "@lancedb+lancedb-win32-x64-msvc@0.40.0"
+    },
+    {
+      "package": "@lydell/node-pty-win32-x64@1.2.0-beta.15",
+      "integrity": "sha512-2f8twEmDVxZ7drchAXjtevpmSPhFok0avAnzXro4t5gmz0xsPNKkoZvymwtuIS3xo7PzQqZOPQ/YzwEMb7oIzQ==",
+      "pnpmPrefix": "@lydell+node-pty-win32-x64@1.2.0-beta.15"
+    },
+    {
+      "package": "@openai/codex@0.164.0-win32-x64",
+      "integrity": "sha512-urWPhwh9YavuoAPIkmVYKBTtd5OtGVL4Ki0Fb28dhK/Mz6Pt4LSy+gbRrZFz5+RXrw9ubvXuXDCcd8beYcWhDg==",
+      "pnpmPrefix": "@openai+codex@0.164.0-win32-x64"
+    },
+    {
+      "package": "@openclaw/fs-safe-win32-x64-msvc@0.26.13",
+      "integrity": "sha512-JQtn+zWFC74cksnynI/IK4b4jEmk64P4qUrGSlVLrEb2jJOngopHiVGq9gNB1FmvpyG7SttBg6wjvUfXe2aHeQ==",
+      "pnpmPrefix": "@openclaw+fs-safe-win32-x64-msvc@0.26.13"
+    },
+    {
+      "package": "@openclaw/fs-safe@0.26.13",
+      "integrity": "sha512-wmHGL0pKcYN8oO+RlvisaZibXDUOQVj6mNQ2VVIoicsqTMvpgzZGX2U4zu8yZtb32MmvPLg1Y9bRQCcePMoEyw==",
+      "pnpmPrefix": "@openclaw+fs-safe@0.26.13"
+    },
+    {
+      "package": "@openclaw/proc-safe-win32-x64-msvc@0.4.2",
+      "integrity": "sha512-K9b/tXmWFl7LDyAnC9j2kldyFs1dH3ZTbMaotQXn3BmNlY7vnzUUl5RE+AvwwzXNQo4TfCznxfU8uYWvlgdZtw==",
+      "pnpmPrefix": "@openclaw+proc-safe-win32-x64-msvc@0.4.2"
+    },
+    {
+      "package": "@openclaw/proc-safe@0.4.2",
+      "integrity": "sha512-Q2yXwYp7i5SlYhXOB62//EJCIGNwH4r8Sbs8QjAMugl7DXTW2/F6qHp9YpIorNLSi88bEKG5lLX48ktaYwwxFA==",
+      "pnpmPrefix": "@openclaw+proc-safe@0.4.2"
+    },
+    {
+      "package": "@oxfmt/binding-win32-x64-msvc@0.74.0",
+      "integrity": "sha512-y9jXUgPBm2TZIWbQhMYRRYAQM57+r4fbykgc+j24ICIIZl+pcuoNhnq1CRGm3oFiHnEUnZO00qOtSPGQdJ2ziQ==",
+      "pnpmPrefix": "@oxfmt+binding-win32-x64-msvc@0.74.0"
+    },
+    {
+      "package": "@oxlint-tsgolint/win32-x64@7.0.2004",
+      "integrity": "sha512-7PsxuUx11Ry9DYTWcljTzRbmZY9B6O9fFFfZV+aodQEMy6pfRT3fhoQRv9PtGN/89z1pPz3nFKrsFm6WqNtX7w==",
+      "pnpmPrefix": "@oxlint-tsgolint+win32-x64@7.0.2004"
+    },
+    {
+      "package": "@oxlint/binding-win32-x64-msvc@1.88.0",
+      "integrity": "sha512-3Sz6rVWe8Dy+ufsXurFN1GX2dX43F/lQMSLelK9gFjiba7nHvLlqlhR5cHlWVnCpSqUY1hN9pyCX9XToe6ve6g==",
+      "pnpmPrefix": "@oxlint+binding-win32-x64-msvc@1.88.0"
+    },
+    {
+      "package": "@pnpm/exe.win32-x64@12.15.0",
+      "integrity": "sha512-nrd+Tp1We1DGj4DGG5Bea9lZNh9y1PjlLBdEwdInS4D0h0UIDtM7JaGGGDJhNzIwcHASyihWI7HLV+dtG+fhYg==",
+      "pnpmPrefix": "@pnpm+exe.win32-x64@12.15.0"
+    },
+    {
+      "package": "@resvg/resvg-js-win32-x64-msvc@2.6.2",
+      "integrity": "sha512-ZXtYhtUr5SSaBrUDq7DiyjOFJqBVL/dOBN7N/qmi/pO0IgiWW/f/ue3nbvu9joWE5aAKDoIzy/CxsY0suwGosQ==",
+      "pnpmPrefix": "@resvg+resvg-js-win32-x64-msvc@2.6.2"
+    },
+    {
+      "package": "@rolldown/binding-win32-x64-msvc@1.2.14",
+      "integrity": "sha512-9mE94bf2GZUaR/fUSXCMpBoWkctu421Mi0ORpm4zqfbkjKep7RxzPFa5etcGs5h+2KApoWBOA/hAJa/7saGgEQ==",
+      "pnpmPrefix": "@rolldown+binding-win32-x64-msvc@1.2.14"
+    },
+    {
+      "package": "@snazzah/davey-win32-x64-msvc@0.1.12",
+      "integrity": "sha512-AgUA3itPDVkxQq7RIkgE1thCiWePwWjyfOZefBBxGIlMWpRUOSwF4vY9kNLnrScyJcFULdR+Zm8PwiwV8/RKnw==",
+      "pnpmPrefix": "@snazzah+davey-win32-x64-msvc@0.1.12"
+    },
+    {
+      "package": "@solidjs/compiler-win32-x64-msvc@2.0.0-rc.18",
+      "integrity": "sha512-DOfsflkkvZ4XRzcgKPTpthdtDB4syTr+8ci6ZZkcfexi2TaxiWROIP7heMFlBBYrSYINW8ct6eOjgkFUom4kqQ==",
+      "pnpmPrefix": "@solidjs+compiler-win32-x64-msvc@2.0.0-rc.18"
+    },
+    {
+      "package": "@trycua/cua-driver-win32-x64-msvc@0.36.0",
+      "integrity": "sha512-0xr9zeQgYgRs8dseiOffD9aQUNFA00mpheyEZe5zgU6pAPEobDdjmVD/BsFFs32zv8xdyn4dmmhILEhJ9uq0jQ==",
+      "pnpmPrefix": "@trycua+cua-driver-win32-x64-msvc@0.36.0"
+    },
+    {
+      "package": "@typescript/typescript-win32-x64@7.1.0-dev.20261016.1",
+      "integrity": "sha512-ezvLsq1zhUhYrVNmp7MSXPnihN1pixsJbdmt3CENPi2IvDh4E7pU+ob3KcbjkzxOodDVuHrX4UsMeFnkXRfVDw==",
+      "pnpmPrefix": "@typescript+typescript-win32-x64@7.1.0-dev.20261016.1"
+    },
+    {
+      "package": "@ubjs/node-win32-x64-msvc@0.31.0-3",
+      "integrity": "sha512-wevs+Y+szwcCUT8IJFbB4/1nfxyRv/51l8oG7FGUPWD1xLPyuHfJBG27C+PDeC7KRzes/2n6aLo4DGZbr/LYTw==",
+      "pnpmPrefix": "@ubjs+node-win32-x64-msvc@0.31.0-3"
+    },
+    {
+      "package": "@yuku-core/binding-win32-x64@0.19.0",
+      "integrity": "sha512-o8iY/mXwlRkedp0LNTr4+TEfXTPQwoNZmv6k+1WIAd1ZXEn8xJJTBCtB0osaVvdZo/x/cNmV16UrWrrGpM5Mvw==",
+      "pnpmPrefix": "@yuku-core+binding-win32-x64@0.19.0"
+    },
+    {
+      "package": "lightningcss-win32-x64-msvc@1.33.0",
+      "integrity": "sha512-OlEICDx/Xl0FqSp4bry8zFnCvGpig3Gl4gCquvYwHuqJKEC1+n9NgDniFvqHGmMv1ZkqDJrDqKKSykTDX+ehuA==",
+      "pnpmPrefix": "lightningcss-win32-x64-msvc@1.33.0"
+    },
+    {
+      "package": "sqlite-vec@0.1.9",
+      "integrity": "sha512-L7XJWRIBNvR9O5+vh1FQ+IGkh/3D2AzVksW5gdtk28m78Hy8skFD0pqReKH1Yp0/BUKRGcffgKvyO/EON5JXpA==",
+      "pnpmPrefix": "sqlite-vec@0.1.9"
+    }
+  ],
+  "meaning": "Expected package identity from pinned lock, not approval of arbitrary native bytes. Independent review required; unknown owners stop upload.",
+  "qualification": "QUARANTINED_CANDIDATE",
+  "sourceHashes": {
+    "package.json": "801cd116568e20a302be83f47b7b96514d9bf89b23e71c5b4e5bab6490acdaef",
+    "pnpm-lock.yaml": "c6f523df6d6bbcd2d97e64ab6c01536d47fd02aac35c5d2238937ad4281300e9",
+    "pnpm-workspace.yaml": "7f00393940a1afc8d55192083e68b7392ab872b9bf5820626e48de10fc9fa80a",
+    "scripts/build-all.mts": "06fcf76854260a8fd28c06ee8231bbf68642515a6426c476eb4a8a65df7f9278"
+  },
+  "rootFiles": [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "cli-invocation.d.mts",
+    "cli-invocation.mjs",
+    "cli-parent-lifetime.d.mts",
+    "cli-parent-lifetime.mjs",
+    "cli-root-options.d.mts",
+    "cli-root-options.mjs",
+    "docker-entrypoint.mjs",
+    "gateway-prewarm.mjs",
+    "gateway-run-argv.d.mts",
+    "gateway-run-argv.mjs",
+    "gateway-shutdown-budget.d.mts",
+    "gateway-shutdown-budget.mjs",
+    "node-compile-cache.d.mts",
+    "node-compile-cache.mjs",
+    "node-host-launcher.mjs",
+    "node-runtime-env.d.mts",
+    "node-runtime-env.mjs",
+    "node-runtime-recovery.d.mts",
+    "node-runtime-recovery.mjs",
+    "node-runtime-update.d.mts",
+    "node-runtime-update.mjs",
+    "node-sqlite-capabilities.d.mts",
+    "node-sqlite-capabilities.mjs",
+    "node-sqlite.d.mts",
+    "node-sqlite.mjs",
+    "node-version.d.mts",
+    "node-version.mjs",
+    "package.json",
+    "runtime-process-bootstrap.generated.d.mts",
+    "runtime-process-bootstrap.generated.mjs",
+    "runtime-process-scripts.generated.d.mts",
+    "runtime-process-scripts.generated.mjs",
+    "standalone-runtime-profile.d.mts",
+    "standalone-runtime-profile.mjs",
+    "worker-heap-flag.mjs"
+  ]
+}
