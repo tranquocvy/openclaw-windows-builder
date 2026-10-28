@@ -303,6 +303,180 @@ $original = Invoke-PreambleProbe ($prefix.Replace('$builderHome','$home')) 'orig
     return report
 
 
+
+def test_build_launches(powershell, git, git_alternative, node):
+    """Run only reviewed production bootstrap slices against synthetic resources."""
+    import base64
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+    script = Path(__file__).resolve().with_name('Build.ps1')
+    root = script.parent.parent
+    shell, git, git_alternative, node = (Path(x).resolve(strict=True) for x in
+                                       (powershell, git, git_alternative, node))
+    need(shell.name.lower() == 'pwsh.exe' and git.name.lower() == 'git.exe'
+         and git_alternative.name.lower() == 'git.exe' and node.name.lower() == 'node.exe',
+         'BOOTSTRAP_EXECUTABLE_NAMES')
+    need(git.parent != git_alternative.parent, 'DISTINCT_DISCOVERY_DIRECTORIES')
+    harness = r"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$parseErrors=$null
+$code=[IO.File]::ReadAllText($env:LAUNCH_SOURCE)
+$ast=[System.Management.Automation.Language.Parser]::ParseInput($code,[ref]$tokens,[ref]$parseErrors)
+if ($parseErrors.Count) { throw 'PRODUCTION_PARSE' }
+$boundary=@($ast.EndBlock.Statements | Where-Object {
+ $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$receipts'
+})
+$function=@($ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Run-Bounded'},$false))
+$lookup=@($ast.EndBlock.Statements | Where-Object {$_.Extent.Text.StartsWith('$git = (Get-Command git.exe -CommandType Application')})
+$pathSetup=@($ast.EndBlock.Statements | Where-Object {$_.Extent.Text.StartsWith('$childEnv.PATH = ')} | Select-Object -First 1)
+$init=@($ast.EndBlock.Statements | Where-Object {$_.Extent.Text -ceq '$null = Run-Bounded ''git-init'' $git @(''init'',''--quiet'',''.'') 30'})
+if ($boundary.Count -ne 1 -or $function.Count -ne 1 -or $lookup.Count -ne 1 -or $pathSetup.Count -ne 1 -or $init.Count -ne 1) { throw 'SOURCE_BOUNDARY' }
+$prefix=$code.Substring(0,$boundary[0].Extent.StartOffset)
+$prefixAst=[System.Management.Automation.Language.Parser]::ParseInput($prefix,[ref]$tokens,[ref]$parseErrors)
+$allowed=@('Join-Path','Test-Path','New-Item','Set-StrictMode')
+foreach ($command in $prefixAst.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true)) {
+ if ($allowed -cnotcontains $command.GetCommandName() -or $command.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown) { throw 'UNREVIEWED_PREFIX' }
+}
+if (@($prefixAst.FindAll({param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst]},$true)).Count) { throw 'UNREVIEWED_PREFIX' }
+. ([scriptblock]::Create($prefix))
+$receipts=[System.Collections.Generic.List[object]]::new()
+. ([scriptblock]::Create($function[0].Extent.Text))
+$gitCandidates=@(Get-Command git.exe -CommandType Application)
+. ([scriptblock]::Create($lookup[0].Extent.Text))
+. ([scriptblock]::Create($pathSetup[0].Extent.Text))
+$report=@{status='FAIL';powershell=$PSVersionTable.PSVersion.ToString();gitDiscoveryCandidates=$gitCandidates.Count;
+ boundExecutableExists=[IO.File]::Exists([string]$git);workingDirectoryExists=[IO.Directory]::Exists($src);
+ useShellExecute=$false;environmentKeys=@($childEnv.Keys|Sort-Object);cases=@()}
+$startTime=Get-Date
+$timeoutChild=$null
+try {
+ # Exact first production call, not a copy of its argument-binding logic.
+ . ([scriptblock]::Create($init[0].Extent.Text))
+ if (-not (Test-Path -LiteralPath (Join-Path $src '.git/HEAD'))) { throw 'SYNTHETIC_GIT_MISSING' }
+ $top=Run-Bounded 'synthetic-root' $git @('rev-parse','--show-toplevel') 5
+ if ([IO.Path]::GetFullPath($top) -ne [IO.Path]::GetFullPath($src)) { throw 'WRONG_REPOSITORY' }
+ $report.cases+=@{id='production-git-init';result='PASS'}
+ if (@($git).Count -ne 1 -or $git -ne $env:LAUNCH_GIT) { throw 'GIT_SELECTION' }
+ $version=Run-Bounded 'synthetic-node-version' $env:LAUNCH_NODE @('--version') 5
+ if ($version -ne 'v24.22.1') { throw 'NODE_VERSION' }
+ $report.cases+=@{id='node-version';result='PASS'}
+ $js='console.error("SYNTHETIC_STDERR");console.log(JSON.stringify({arg:process.argv[1],parentPresent:"SYNTHETIC_PARENT_ONLY" in process.env}))'
+ $result=Run-Bounded 'synthetic-stdio' $env:LAUNCH_NODE @('-e',$js,'argument with spaces') 5
+ $parsed=$result|ConvertFrom-Json
+ if ($parsed.arg -ne 'argument with spaces' -or $parsed.parentPresent -ne $false -or $result.Contains('SYNTHETIC_STDERR')) { throw 'STDIO_OR_ENVIRONMENT' }
+ $report.cases+=@{id='stdio-arguments-parent-env-filter';result='PASS'}
+ $rejected=$false
+ try { $null=Run-Bounded 'synthetic-exit' $env:LAUNCH_NODE @('-e','process.exit(7)') 5 }
+ catch { if ($_.Exception.Message -eq 'Nonzero exit: synthetic-exit') { $rejected=$true } else { throw } }
+ if (-not $rejected -or $receipts[$receipts.Count-1].exit -ne 7) { throw 'NONZERO_NOT_REJECTED' }
+ $report.cases+=@{id='nonzero-exit';result='EXPECTED_REJECTION'}
+ $rejected=$false
+ $js='require("fs").writeFileSync("timeout-child.pid",String(process.pid));setInterval(()=>{},1000)'
+ try { $null=Run-Bounded 'synthetic-timeout' $env:LAUNCH_NODE @('-e',$js) 1 }
+ catch { if ($_.Exception.Message -eq 'Timeout: synthetic-timeout') { $rejected=$true } else { throw } }
+ $pidFile=Join-Path $src 'timeout-child.pid'
+ if (-not $rejected -or -not (Test-Path -LiteralPath $pidFile)) { throw 'TIMEOUT_NOT_EXERCISED' }
+ $ownedId=[int][IO.File]::ReadAllText($pidFile)
+ $timeoutChild=Get-Process -Id $ownedId -ErrorAction SilentlyContinue
+ if ($null -ne $timeoutChild) { throw 'TIMEOUT_CHILD_ALIVE' }
+ $report.cases+=@{id='timeout-kills-owned-child';result='EXPECTED_REJECTION';childAlive=$false}
+ $rejected=$false
+ try { $null=Run-Bounded 'synthetic-missing-exe' (Join-Path $tools 'missing.exe') @() 1 }
+ catch { if ($_.Exception.Message -eq 'Executable unavailable: synthetic-missing-exe') { $rejected=$true } else { throw } }
+ if (-not $rejected) { throw 'MISSING_EXE_NOT_REJECTED' }
+ $report.cases+=@{id='missing-executable';result='EXPECTED_REJECTION'}
+ $originalSrc=$src;$src=Join-Path $base 'missing-directory';$rejected=$false
+ try { $null=Run-Bounded 'synthetic-missing-cwd' $git @('--version') 1 }
+ catch { if ($_.Exception.Message -eq 'Working directory unavailable: synthetic-missing-cwd') { $rejected=$true } else { throw } }
+ finally { $src=$originalSrc }
+ if (-not $rejected) { throw 'MISSING_CWD_NOT_REJECTED' }
+ $report.cases+=@{id='missing-working-directory';result='EXPECTED_REJECTION'}
+ # Load only the real workflow's Python lookup; never execute any gate/upload.
+ $pythonLines=@([IO.File]::ReadAllLines($env:LAUNCH_WORKFLOW) | Where-Object {$_.Trim().StartsWith('$python = (Get-Command python.exe -CommandType Application')})
+ if ($pythonLines.Count -ne 1) { throw 'WORKFLOW_LOOKUP_BOUNDARY' }
+ $report.pythonDiscoveryCandidates=@(Get-Command python.exe -CommandType Application).Count
+ . ([scriptblock]::Create($pythonLines[0].Trim()))
+ $pythonOutput=@(& $python -I -S -c 'print("SYNTHETIC_PYTHON")')
+ if ($LASTEXITCODE -ne 0 -or $pythonOutput.Count -ne 1 -or $pythonOutput[0] -ne 'SYNTHETIC_PYTHON') { throw 'PYTHON_BOOTSTRAP' }
+ if (@($python).Count -ne 1 -or $python -ne $env:LAUNCH_PYTHON) { throw 'PYTHON_SELECTION' }
+ $report.cases+=@{id='production-workflow-python-lookup';result='PASS'}
+ $report.status='PASS'
+} catch {
+ $report.failureType=$_.Exception.GetType().FullName
+ $report.failureClassifiers=@(@('NativeCommandFailed','CommandNotFoundException','ProgramFailedToRun','InvalidOperation','PropertyNotFoundStrict','CantActivateDocumentInPipeline') | Where-Object {$Error[0].FullyQualifiedErrorId.Contains($_)})
+ $report.messageCategories=@(@('Access is denied','cannot find','working directory','read-only','not recognized','could not be run','permission','NativeCommand') | Where-Object {$Error[0].Exception.Message.Contains($_)})
+ $errorObject=$_.Exception;$nativeCodes=@()
+ while ($null -ne $errorObject) {
+  if ($errorObject -is [System.ComponentModel.Win32Exception]) { $nativeCodes+=$errorObject.NativeErrorCode }
+  $errorObject=$errorObject.InnerException
+ }
+ $report.nativeErrorCodes=$nativeCodes
+ $known=@('GIT_SELECTION','NODE_VERSION','PYTHON_SELECTION','PYTHON_BOOTSTRAP','SYNTHETIC_GIT_MISSING','WRONG_REPOSITORY','STDIO_OR_ENVIRONMENT','NONZERO_NOT_REJECTED','TIMEOUT_NOT_EXERCISED','TIMEOUT_CHILD_ALIVE','MISSING_EXE_NOT_REJECTED','MISSING_CWD_NOT_REJECTED','WORKFLOW_LOOKUP_BOUNDARY')
+ $report.failureCategory=if ($known -contains $_.Exception.Message) { $_.Exception.Message } else { 'PRODUCTION_RUNTIME_EXCEPTION' }
+} finally {
+ # Recovery touches only the PID written by this synthetic Node fixture.
+ $pidFile=Join-Path $src 'timeout-child.pid'
+ if (Test-Path -LiteralPath $pidFile) {
+  $ownedId=[int][IO.File]::ReadAllText($pidFile)
+  $owned=Get-Process -Id $ownedId -ErrorAction SilentlyContinue
+  if ($null -ne $owned) {
+   if ($owned.Path -ne $env:LAUNCH_NODE -or $owned.StartTime -lt $startTime) { throw 'OWNED_CHILD_IDENTITY_UNCERTAIN' }
+   $owned.Kill($true);$owned.WaitForExit()
+  }
+  $report.timeoutChildSettled=$null -eq (Get-Process -Id $ownedId -ErrorAction SilentlyContinue)
+ }
+}
+$report.receipts=@($receipts.ToArray())
+$report | ConvertTo-Json -Depth 7 -Compress
+"""
+    with tempfile.TemporaryDirectory(prefix='.launch-', dir=root) as fixture:
+        directory = Path(fixture).resolve()
+        need(directory.parent == root.resolve(), 'FIXTURE_SCOPE')
+        alternative = directory / 'python-alternative'
+        alternative.mkdir()
+        shutil.copyfile(sys.executable, alternative / 'python.exe')
+        system = Path(os.environ['SystemRoot'])
+        environment = {'SystemRoot': str(system), 'WINDIR': str(system),
+                       'ComSpec': str(system / 'System32/cmd.exe'),
+                       'PATHEXT': '.COM;.EXE;.BAT;.CMD',
+                       'PATH': ';'.join(map(str, [git.parent, git_alternative.parent,
+                                                Path(sys.executable).parent, alternative])),
+                       'HOME': fixture, 'USERPROFILE': fixture, 'APPDATA': fixture,
+                       'LOCALAPPDATA': fixture, 'TEMP': fixture, 'TMP': fixture,
+                       'RUNNER_TEMP': fixture, 'LAUNCH_SOURCE': str(script),
+                       'LAUNCH_WORKFLOW': str(root / '.github/workflows/build-windows.yml'),
+                       'LAUNCH_GIT': str(git), 'LAUNCH_NODE': str(node),
+                       'LAUNCH_PYTHON': sys.executable,
+                       'GITHUB_ACTIONS': 'true', 'RUNNER_OS': 'Windows',
+                       'GITHUB_REPOSITORY': 'tranquocvy/openclaw-windows-builder',
+                       'CPA_RUN_ATTEMPT': '1', 'CPA_RUN_ID': 'synthetic',
+                       'SYNTHETIC_PARENT_ONLY': 'synthetic-fixture'}
+        encoded = base64.b64encode(harness.encode('utf-16le')).decode()
+        process = subprocess.Popen([str(shell), '-NoProfile', '-NonInteractive',
+                                    '-EncodedCommand', encoded], cwd=directory,
+                                   env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            stdout, stderr = process.communicate(timeout=45)
+        except subprocess.TimeoutExpired:
+            # Only this still-owned live process tree; never a global name kill.
+            if process.poll() is None:
+                subprocess.run([str(system / 'System32/taskkill.exe'), '/PID', str(process.pid),
+                                '/T', '/F'], env=environment, capture_output=True, timeout=10)
+            process.communicate(timeout=10)
+            raise Rejected('BOOTSTRAP_OUTER_TIMEOUT')
+        need(process.returncode == 0, 'BOOTSTRAP_HARNESS_RUNTIME')
+        lines = stdout.decode('utf-8-sig').splitlines()
+        report = json.loads(lines[-1])
+        report['productionSha256'] = hashlib.sha256(script.read_bytes()).hexdigest()
+        report['workflowSha256'] = hashlib.sha256((root / '.github/workflows/build-windows.yml').read_bytes()).hexdigest()
+    report['fixtureCleanup'] = not directory.exists()
+    need(report['fixtureCleanup'], 'BOOTSTRAP_FIXTURE_CLEANUP')
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     for key in ('archive', 'checksums', 'policy', 'report', 'workflow-sha', 'run-id'):
@@ -352,6 +526,22 @@ if __name__ == '__main__':
             raise SystemExit(1)
         except Exception:
             print('PREAMBLE_TEST_FAILED; no raw exception output')
+            raise SystemExit(1)
+    elif sys.argv[1:2] == ['--test-build-launches']:
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--test-build-launches', action='store_true')
+        for key in ('powershell', 'git', 'git-alternative', 'node'):
+            parser.add_argument('--' + key, required=True)
+        args = parser.parse_args()
+        try:
+            report = test_build_launches(args.powershell, args.git, args.git_alternative, args.node)
+            print(json.dumps(report, indent=2))
+            raise SystemExit(0 if report['status'] == 'PASS' else 1)
+        except Rejected as exc:
+            print('BOOTSTRAP_TEST_FAILED: ' + str(exc))
+            raise SystemExit(1)
+        except Exception:
+            print('BOOTSTRAP_TEST_FAILED; no raw exception output')
             raise SystemExit(1)
     else:
         raise SystemExit(main())

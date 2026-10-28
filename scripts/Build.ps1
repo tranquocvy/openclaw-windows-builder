@@ -37,6 +37,8 @@ $childEnv = @{
 # access to the runner agent/token or a network enforcement boundary.
 $receipts = [System.Collections.Generic.List[object]]::new()
 function Run-Bounded([string]$Id,[string]$Exe,[string[]]$Arguments,[int]$Seconds) {
+  if (-not [IO.Path]::IsPathFullyQualified($Exe) -or -not [IO.File]::Exists($Exe)) { throw ('Executable unavailable: ' + $Id) }
+  if (-not [IO.Directory]::Exists($src)) { throw ('Working directory unavailable: ' + $Id) }
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   $psi.FileName = $Exe; $psi.WorkingDirectory = $src
   $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
@@ -70,7 +72,7 @@ function Download([string]$Url,[string]$Path) {
   # Fixed public HTTPS URLs; no credentials or registry auth config.
   Invoke-WebRequest -Uri $Url -OutFile $Path -MaximumRedirection 0 -TimeoutSec 120
 }
-$git = (Get-Command git.exe -CommandType Application).Source
+$git = (Get-Command git.exe -CommandType Application | Select-Object -First 1).Source
 $childEnv.PATH = (Split-Path $git) + ';' + $env:SystemRoot + '\System32'
 $null = Run-Bounded 'git-init' $git @('init','--quiet','.') 30
 $g = @('-c','credential.helper=','-c','core.hooksPath=NUL','-c','core.autocrlf=false',

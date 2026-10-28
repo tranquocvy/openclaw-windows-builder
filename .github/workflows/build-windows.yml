@@ -78,7 +78,7 @@ jobs:
             }
           }
           Assert-BuilderControls
-          $python = (Get-Command python.exe -CommandType Application).Source
+          $python = (Get-Command python.exe -CommandType Application | Select-Object -First 1).Source
           & $python -I -B ./scripts/test_candidate.py --archive "$env:RUNNER_TEMP/cpa-export/openclaw-windows-candidate.zip" --checksums "$env:RUNNER_TEMP/cpa-export/SHA256SUMS" --policy ./policy/artifact-policy.json --report "$env:RUNNER_TEMP/cpa-export/gate-report.json" --workflow-sha $env:EXPECTED_WORKFLOW_SHA --run-id $env:EXPECTED_RUN_ID
           if ($LASTEXITCODE -ne 0) { throw 'Candidate gate failed; no upload' }
           $export = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/cpa-export" -File -Force)
