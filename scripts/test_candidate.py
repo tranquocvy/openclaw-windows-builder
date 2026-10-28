@@ -1,4 +1,5 @@
 """Non-executing ZIP gate. Never imports/executes candidate code or extracts it.
+Developer-only --test-build-preamble separately runs reviewed builder initialization.
 
 Same-runner consistency screening only; a compromised builder can forge this
 program, policy, receipt and output. Independent review is required before use.
@@ -183,6 +184,125 @@ def validate_archive(stream, policy, workflow_sha, run_id):
                 'hostExecution': False, 'source': r['source'], 'workflowSha': workflow_sha, 'runId': str(run_id)}
 
 
+def test_build_preamble(powershell):
+    """Developer-only test of reviewed production statements; never loads a payload."""
+    import base64
+    import os
+    import subprocess
+    import tempfile
+    script = Path(__file__).resolve().with_name('Build.ps1')
+    shell = Path(powershell).resolve(strict=True)
+    need(shell.name.lower() == 'pwsh.exe', 'POWERSHELL_EXECUTABLE')
+    harness = r"""
+$ErrorActionPreference = 'Stop'
+$tokens = $null; $parseErrors = $null
+$sourceText = [IO.File]::ReadAllText($env:PREAMBLE_SOURCE)
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($sourceText,[ref]$tokens,[ref]$parseErrors)
+if ($parseErrors.Count) { throw 'PRODUCTION_PARSE' }
+$boundaries = @($ast.EndBlock.Statements | Where-Object {
+  $_ -is [System.Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -ceq '$receipts'
+})
+if ($boundaries.Count -ne 1) { throw 'PREAMBLE_BOUNDARY' }
+$prefix = $sourceText.Substring(0,$boundaries[0].Extent.StartOffset)
+$prefixAst = [System.Management.Automation.Language.Parser]::ParseInput($prefix,[ref]$tokens,[ref]$parseErrors)
+if ($parseErrors.Count) { throw 'PREFIX_PARSE' }
+$allowed = @('Join-Path','Test-Path','New-Item','Set-StrictMode')
+$commands = @($prefixAst.FindAll({param($n) $n -is [System.Management.Automation.Language.CommandAst]},$true))
+foreach ($command in $commands) {
+  if ($allowed -cnotcontains $command.GetCommandName() -or
+      $command.InvocationOperator -ne [System.Management.Automation.Language.TokenKind]::Unknown) {
+    throw 'UNREVIEWED_PREAMBLE_COMMAND'
+  }
+}
+if (@($prefixAst.FindAll({param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst]},$true)).Count) {
+  throw 'UNREVIEWED_PREAMBLE_MEMBER_CALL'
+}
+# Names/options only: never collect automatic variable values.
+$protected = @(Get-Variable | Where-Object {
+  $_.Options -band ([System.Management.Automation.ScopedItemOptions]::ReadOnly -bor
+                    [System.Management.Automation.ScopedItemOptions]::Constant)
+} | ForEach-Object Name) + @('HOME','PID','PSVersionTable','PSScriptRoot','PSCommandPath',
+                            'args','input','Error','MyInvocation','PSBoundParameters','CODEX_HOME')
+$bindings = @($ast.FindAll({param($n)
+  $n -is [System.Management.Automation.Language.AssignmentStatementAst] -or
+  $n -is [System.Management.Automation.Language.ParameterAst] -or
+  $n -is [System.Management.Automation.Language.ForEachStatementAst]
+},$true))
+$names = foreach ($binding in $bindings) {
+  if ($binding -is [System.Management.Automation.Language.AssignmentStatementAst]) {
+    if ($binding.Left -is [System.Management.Automation.Language.VariableExpressionAst]) {
+      $binding.Left.VariablePath.UserPath -replace '^script:',''
+    }
+  } elseif ($binding -is [System.Management.Automation.Language.ParameterAst]) {
+    $binding.Name.VariablePath.UserPath
+  } else { $binding.Variable.VariablePath.UserPath }
+}
+$collisions = @($names | Where-Object { $protected -icontains $_ } | Sort-Object -Unique)
+function Invoke-PreambleProbe([string]$Code,[string]$Case) {
+  $env:RUNNER_TEMP = Join-Path $env:FIXTURE_ROOT $Case
+  $null = New-Item -ItemType Directory -Path $env:RUNNER_TEMP
+  try {
+    . ([scriptblock]::Create($Code))
+    if ($Case -eq 'original') { throw 'OLD_BUG_NOT_DETECTED' }
+    $expected = Join-Path (Join-Path $env:RUNNER_TEMP 'cpa-synthetic') 'home'
+    if ($builderHome -cne $expected) { throw 'SYNTHETIC_HOME' }
+    foreach ($key in @('TEMP','TMP','HOME','USERPROFILE','APPDATA','LOCALAPPDATA')) {
+      if ($childEnv[$key] -cne $expected) { throw 'CHILD_ENV_BINDING' }
+    }
+    foreach ($key in @('NPM_CONFIG_USERCONFIG','NPM_CONFIG_GLOBALCONFIG')) {
+      if (-not $childEnv[$key].StartsWith($expected + [IO.Path]::DirectorySeparatorChar)) {
+        throw 'SYNTHETIC_CONFIG_PATH'
+      }
+    }
+    foreach ($path in @($src,$tools,$builderHome,$store,$out)) {
+      if (-not (Test-Path -LiteralPath $path -PathType Container)) { throw 'FIXTURE_DIRECTORY' }
+    }
+    return @{case=$Case;result='PASS';initialization='COMPLETE'}
+  } catch {
+    if ($Case -eq 'original' -and $_.FullyQualifiedErrorId -eq 'VariableNotWritable') {
+      if (@(Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Force).Count) { throw 'OLD_BUG_SIDE_EFFECT' }
+      return @{case=$Case;result='EXPECTED_FAIL';errorId='VariableNotWritable'}
+    }
+    if ($_.FullyQualifiedErrorId -eq 'VariableNotWritable') { throw 'PREAMBLE_AUTOMATIC_VARIABLE' }
+    throw 'PREAMBLE_REGRESSION_FAILED'
+  }
+}
+$fixed = Invoke-PreambleProbe $prefix 'fixed'
+if ($collisions.Count) { throw 'AUTOMATIC_VARIABLE_COLLISION' }
+if (-not $prefix.Contains('$builderHome = ') -or $prefix.Contains('$home = ')) { throw 'REPAIR_BINDING' }
+# Recreate the former production spelling in memory, not a duplicate preamble.
+$original = Invoke-PreambleProbe ($prefix.Replace('$builderHome','$home')) 'original'
+@{status='PASS';powershell=$PSVersionTable.PSVersion.ToString();fixed=$fixed;original=$original;
+  preambleEndOffset=$boundaries[0].Extent.StartOffset;productionBindingsReviewed=@($names).Count;
+  automaticVariableCollisions=$collisions;networkOrBuildInvoked=$false} | ConvertTo-Json -Depth 5 -Compress
+"""
+    # A fresh synthetic HOME and a small allowlist, never inherited auth/config.
+    with tempfile.TemporaryDirectory(prefix='.preamble-', dir=script.parent.parent) as fixture:
+        system = Path(os.environ['SystemRoot'])
+        environment = {'SystemRoot': str(system), 'WINDIR': str(system),
+                       'ComSpec': str(system / 'System32/cmd.exe'),
+                       'HOME': fixture, 'USERPROFILE': fixture, 'APPDATA': fixture,
+                       'LOCALAPPDATA': fixture, 'TEMP': fixture, 'TMP': fixture,
+                       'PREAMBLE_SOURCE': str(script), 'FIXTURE_ROOT': fixture,
+                       'GITHUB_ACTIONS': 'true', 'RUNNER_OS': 'Windows',
+                       'GITHUB_REPOSITORY': 'tranquocvy/openclaw-windows-builder',
+                       'CPA_RUN_ATTEMPT': '1', 'CPA_RUN_ID': 'synthetic'}
+        encoded = base64.b64encode(harness.encode('utf-16le')).decode()
+        result = subprocess.run([str(shell), '-NoProfile', '-NonInteractive',
+                                 '-EncodedCommand', encoded], cwd=fixture, env=environment,
+                                capture_output=True, timeout=30)
+        if result.returncode and b'PREAMBLE_AUTOMATIC_VARIABLE' in result.stderr:
+            raise Rejected('AUTOMATIC_VARIABLE_RUNTIME')
+        need(result.returncode == 0, 'PREAMBLE_RUNTIME_REGRESSION')
+        report = json.loads(result.stdout.decode('utf-8-sig').strip())
+        need(report['status'] == 'PASS' and report['original']['result'] == 'EXPECTED_FAIL',
+             'REGRESSION_RECEIPT')
+        report['productionSha256'] = hashlib.sha256(script.read_bytes()).hexdigest()
+    report['fixtureCleanup'] = not Path(fixture).exists()
+    need(report['fixtureCleanup'], 'FIXTURE_CLEANUP')
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser()
     for key in ('archive', 'checksums', 'policy', 'report', 'workflow-sha', 'run-id'):
@@ -219,4 +339,19 @@ def main():
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    import sys
+    if sys.argv[1:2] == ['--test-build-preamble']:
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--test-build-preamble', action='store_true')
+        parser.add_argument('--powershell', required=True)
+        args = parser.parse_args()
+        try:
+            print(json.dumps(test_build_preamble(args.powershell), indent=2))
+        except Rejected as exc:
+            print('PREAMBLE_TEST_FAILED: ' + str(exc))
+            raise SystemExit(1)
+        except Exception:
+            print('PREAMBLE_TEST_FAILED; no raw exception output')
+            raise SystemExit(1)
+    else:
+        raise SystemExit(main())

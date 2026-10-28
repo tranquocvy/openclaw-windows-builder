@@ -15,21 +15,21 @@ $base = Join-Path $env:RUNNER_TEMP ('cpa-' + $env:CPA_RUN_ID)
 if (Test-Path -LiteralPath $base) { throw 'Fresh directory required' }
 $src = Join-Path $base 'source'
 $tools = Join-Path $base 'tools'
-$home = Join-Path $base 'home'
+$builderHome = Join-Path $base 'home'
 $store = Join-Path $base 'store'
 $out = Join-Path $env:RUNNER_TEMP 'cpa-export'
 if (Test-Path -LiteralPath $out) { throw 'Export path already exists' }
-$null = New-Item -ItemType Directory -Path $src,$tools,$home,$store,$out
+$null = New-Item -ItemType Directory -Path $src,$tools,$builderHome,$store,$out
 $childEnv = @{
   SystemRoot = $env:SystemRoot; WINDIR = $env:WINDIR
-  TEMP = $home; TMP = $home; HOME = $home; USERPROFILE = $home
-  APPDATA = $home; LOCALAPPDATA = $home; CI = 'true'
+  TEMP = $builderHome; TMP = $builderHome; HOME = $builderHome; USERPROFILE = $builderHome
+  APPDATA = $builderHome; LOCALAPPDATA = $builderHome; CI = 'true'
   ComSpec = (Join-Path $env:SystemRoot 'System32/cmd.exe')
   PATHEXT = '.COM;.EXE;.BAT;.CMD'
   GIT_CONFIG_NOSYSTEM = '1'; GIT_CONFIG_GLOBAL = 'NUL'
   GIT_TERMINAL_PROMPT = '0'; GIT_CONFIG_COUNT = '0'
-  NPM_CONFIG_USERCONFIG = (Join-Path $home 'empty.npmrc')
-  NPM_CONFIG_GLOBALCONFIG = (Join-Path $home 'empty-global.npmrc')
+  NPM_CONFIG_USERCONFIG = (Join-Path $builderHome 'empty.npmrc')
+  NPM_CONFIG_GLOBALCONFIG = (Join-Path $builderHome 'empty-global.npmrc')
   NPM_CONFIG_REGISTRY = 'https://registry.npmjs.org/'
   OPENCLAW_BUILD_ALL_NO_PNPM = '1'; NODE_DISABLE_COMPILE_CACHE = '1'
 }
