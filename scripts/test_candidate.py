@@ -11,6 +11,9 @@ from pathlib import Path
 import re
 import stat
 import zipfile
+import contextlib
+import threading
+import time
 
 
 class Rejected(Exception):
@@ -184,7 +187,85 @@ def validate_archive(stream, policy, workflow_sha, run_id):
                 'hostExecution': False, 'source': r['source'], 'workflowSha': workflow_sha, 'runId': str(run_id)}
 
 
-def prepare_runtime(source, destination, policy):
+class ExportProgress:
+    """Fixed enums and aggregate integers only;never accepts paths or text payloads.
+
+    Periodic snapshot thread makes a stalled operation visible without profiling.
+    At most64 records of512 bytes,including one reserved terminal record.
+    """
+    PHASES = ('METADATA_RESOLUTION', 'RUNTIME_SELECTION', 'SNAPSHOT_COPY', 'MANIFEST_FINALIZATION')
+    COUNTERS = ('files', 'directories', 'dependencies', 'readBytes', 'copiedFiles',
+                'copiedBytes', 'hashes', 'identityChecks', 'links')
+
+    def __init__(self, stream):
+        self.stream, self.started = stream, time.monotonic()
+        self.current, self.changed = 'RUNTIME_SELECTION', self.started
+        self.durations = {p: 0.0 for p in self.PHASES}
+        self.counters = {k: 0 for k in self.COUNTERS}
+        self.lock, self.stop = threading.RLock(), threading.Event()
+        self.count, self.seen, self.broken = 0, set(), False
+        self.set_phase(self.current)
+        self.worker = threading.Thread(target=self._periodic, daemon=True)
+        self.worker.start()
+
+    def _emit(self, status):
+        if self.count >= (64 if status != 'RUNNING' else 63):
+            return
+        now = time.monotonic()
+        durations = dict(self.durations)
+        durations[self.current] += now - self.changed
+        numbers = [int((now - self.started) * 1000)]
+        numbers += [int(durations[p] * 1000) for p in self.PHASES]
+        numbers += [self.counters[k] for k in self.COUNTERS]
+        need(status in ('RUNNING', 'SUCCEEDED', 'FAILED') and
+             all(type(n) is int and 0 <= n <= 9007199254740991 for n in numbers), 'EXPORT_PROGRESS_SCHEMA')
+        line = '|'.join(['EP1', self.current, status] + [str(n) for n in numbers]) + '\n'
+        need(len(line.encode('ascii')) <= 512, 'EXPORT_PROGRESS_CAP')
+        self.stream.write(line); self.stream.flush()
+        self.count += 1
+
+    def _periodic(self):
+        while not self.stop.wait(5):
+            try:
+                with self.lock:
+                    self._emit('RUNNING')
+            except Exception:
+                self.broken = True
+                self.stop.set()
+
+    def set_phase(self, name):
+        need(name in self.PHASES, 'EXPORT_PROGRESS_SCHEMA')
+        with self.lock:
+            now = time.monotonic()
+            self.durations[self.current] += now - self.changed
+            self.current, self.changed = name, now
+            if name not in self.seen:
+                self.seen.add(name)
+                self._emit('RUNNING')
+
+    @contextlib.contextmanager
+    def phase(self, name):
+        previous = self.current
+        self.set_phase(name)
+        try:
+            yield
+        finally:
+            self.set_phase(previous)
+
+    def add(self, **values):
+        with self.lock:
+            for key, value in values.items():
+                need(key in self.counters and type(value) is int and value >= 0, 'EXPORT_PROGRESS_SCHEMA')
+                self.counters[key] += value
+
+    def finish(self, status):
+        self.stop.set(); self.worker.join(timeout=1)
+        need(not self.worker.is_alive() and not self.broken, 'EXPORT_PROGRESS_UNSETTLED')
+        with self.lock:
+            self._emit(status)
+
+
+def prepare_runtime(source, destination, policy, progress=None):
     """Project declared runtime package units; never import/execute candidate code."""
     import contextlib
     import ctypes
@@ -221,6 +302,16 @@ def prepare_runtime(source, destination, policy):
     files, aliases, packages, identities, deferred = {}, {}, set(), {}, {}
     total = 0
 
+    def phase_operation(name):
+        def decorate(fn):
+            if progress is None:
+                return fn
+            def wrapped(*args, **kwargs):
+                with progress.phase(name):
+                    return fn(*args, **kwargs)
+            return wrapped
+        return decorate
+
     def relative(path):
         try:
             rel = Path(os.path.abspath(path)).relative_to(root).as_posix()
@@ -237,6 +328,8 @@ def prepare_runtime(source, destination, policy):
         path = Path(os.path.abspath(path))
         # No reparse ancestor,including ancestors outside the source root.
         handles = []
+        if progress is not None:
+            checked = 0
         try:
             chain = [*reversed(path.parents), path]
             for index, item in enumerate(chain):
@@ -249,6 +342,8 @@ def prepare_runtime(source, destination, policy):
                 handles.append(handle)
                 info = Info()
                 need(kernel.GetFileInformationByHandle(handle, ctypes.byref(info)), 'EXPORT_IDENTITY')
+                if progress is not None:
+                    checked += 1
                 need(not info.attrs & 0x400, 'EXPORT_REPARSE_ANCESTOR')
                 need(bool(info.attrs & 0x10) == is_dir, 'EXPORT_OBJECT_TYPE')
                 if last:
@@ -269,6 +364,8 @@ def prepare_runtime(source, destination, policy):
         finally:
             for handle in reversed(handles):
                 kernel.CloseHandle(handle)
+            if progress is not None:
+                progress.add(identityChecks=checked)
 
     def read(path):
         rel = relative(path)
@@ -291,8 +388,11 @@ def prepare_runtime(source, destination, policy):
             with os.fdopen(fd, 'rb') as stream:
                 data = stream.read(size + 1)
             need(len(data) == size and not sensitive(data), 'EXPORT_CONTENT_BLOCKED')
+            if progress is not None:
+                progress.add(readBytes=len(data))
             return data
 
+    @phase_operation('METADATA_RESOLUTION')
     def metadata(directory):
         data = read(directory / 'package.json')
         need(len(data) <= 32 * 1024 * 1024, 'METADATA_CAP')
@@ -316,8 +416,12 @@ def prepare_runtime(source, destination, policy):
         need(total <= policy['maxExpandedBytes'] and (len(files) + len(aliases)) < policy['maxEntries'], 'EXPORT_CAP')
         files[key] = {'rel': rel, 'path': path, 'bytes': len(data),
                       'sha256': hashlib.sha256(data).hexdigest()}
+        if progress is not None:
+            progress.add(files=1, hashes=1)
 
     def resolve_link(path):
+        if progress is not None:
+            progress.add(links=1)
         rel = relative(path)
         target_text = os.readlink(path)
         if target_text.startswith('\\\\?\\'):
@@ -336,6 +440,8 @@ def prepare_runtime(source, destination, policy):
         return target
 
     def tree(directory, depth=0):
+        if progress is not None:
+            progress.add(directories=1)
         need(depth <= 100, 'EXPORT_DEPTH')
         relative(directory)
         with locked(directory, directory=True):
@@ -356,7 +462,10 @@ def prepare_runtime(source, destination, policy):
                 else:
                     raise Rejected('EXPORT_OBJECT_TYPE')
 
+    @phase_operation('METADATA_RESOLUTION')
     def dependency(from_dir, name, optional=False):
+        if progress is not None:
+            progress.add(dependencies=1)
         need(isinstance(name, str) and bool(re.fullmatch(
             r'(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*', name)), 'EXPORT_DEPENDENCY_NAME')
         directory = from_dir
@@ -445,6 +554,7 @@ def prepare_runtime(source, destination, policy):
                 need(isinstance(plugin['setupEntry'], str), 'EXPORT_PLUGIN_METADATA')
                 walk(plugin['setupEntry'])
 
+    @phase_operation('RUNTIME_SELECTION')
     def package(directory):
         rel = relative(directory)
         if rel.casefold() in packages:
@@ -504,6 +614,8 @@ def prepare_runtime(source, destination, policy):
                 stream.flush()
                 stream.seek(0)
                 need(hashlib.sha256(stream.read()).hexdigest() == expected_hash, 'EXPORT_WRITE_HASH')
+                if progress is not None:
+                    progress.add(hashes=1)
 
     with locked(root, directory=True), locked(output, directory=True, destination_parent=True):
         need(not any(output.iterdir()), 'EXPORT_ROOTS')
@@ -538,9 +650,13 @@ def prepare_runtime(source, destination, policy):
             need(any(k.startswith(target + '/') for k in files), 'EXPORT_LINK_TARGET')
             need(not any(target == a or target.startswith(a + '/') for a in aliases), 'EXPORT_LINK_CHAIN')
         # No payload writes until selection,required edges and content checks all pass.
+        if progress is not None:
+            progress.set_phase('SNAPSHOT_COPY')
         for item in files.values():
             data = read(item['path'])
             need(hashlib.sha256(data).hexdigest() == item['sha256'], 'EXPORT_CHANGED_SNAPSHOT')
+            if progress is not None:
+                progress.add(hashes=1)
             dst = output / item['rel']
             parent = output
             for part in item['rel'].split('/')[:-1]:
@@ -552,6 +668,10 @@ def prepare_runtime(source, destination, policy):
                         pass
                 parent = child
             write_new(dst, data, item['sha256'])
+            if progress is not None:
+                progress.add(copiedFiles=1, copiedBytes=len(data))
+        if progress is not None:
+            progress.set_phase('MANIFEST_FINALIZATION')
         rows = [{'path': 'runtime/' + x['rel'], 'bytes': x['bytes'], 'sha256': x['sha256']}
                 for x in sorted(files.values(), key=lambda x: x['rel'])]
         link_rows = sorted(aliases.values(), key=lambda x: x['path'])
@@ -559,6 +679,8 @@ def prepare_runtime(source, destination, policy):
             data = (json.dumps(values, separators=(',', ':')) + '\n').encode('utf-8')
             need(len(data) <= 32 * 1024 * 1024, 'METADATA_CAP')
             write_new(output.parent / filename, data, hashlib.sha256(data).hexdigest())
+            if progress is not None:
+                progress.add(hashes=1)
         return rows, link_rows
 
 
@@ -1259,17 +1381,21 @@ if __name__ == '__main__':
         for key in ('source', 'destination', 'policy', 'files', 'links'):
             parser.add_argument('--' + key, required=True)
         args = parser.parse_args()
+        progress = ExportProgress(sys.stdout)
         try:
             policy = json.loads(Path(args.policy).read_text(encoding='utf-8'))
             base = Path(args.destination).absolute().parent
             need(Path(args.files).absolute() == base / 'files.json' and
                  Path(args.links).absolute() == base / 'links.json', 'EXPORT_MANIFEST_PATH')
-            rows, links = prepare_runtime(args.source, args.destination, policy)
+            rows, links = prepare_runtime(args.source, args.destination, policy, progress)
+            progress.finish('SUCCEEDED')
             print('Runtime export selected; qualification remains required')
         except Rejected as exc:
+            progress.finish('FAILED')
             print('RUNTIME_EXPORT_REJECTED: ' + str(exc))
             raise SystemExit(1)
         except Exception:
+            progress.finish('FAILED')
             print('RUNTIME_EXPORT_REJECTED; no raw exception output')
             raise SystemExit(1)
     else:

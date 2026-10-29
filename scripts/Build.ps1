@@ -36,6 +36,32 @@ $childEnv = @{
 # This removes inheritance for launched children, NOT administrator
 # access to the runner agent/token or a network enforcement boundary.
 $receipts = [System.Collections.Generic.List[object]]::new()
+function Publish-ExportProgress([string]$Text,[bool]$RequireSuccess) {
+  # A numeric protocol is reconstructed;never echo child lines or parse errors.
+  if ($Text.Length -gt 65536) { throw 'Export progress cap' }
+  $records = [System.Collections.Generic.List[string]]::new()
+  $lastStatus = ''
+  foreach ($line in $Text.Split("`n")) {
+    if (-not $line.StartsWith('EP1|',[StringComparison]::Ordinal)) { continue }
+    $parts = $line.TrimEnd("`r").Split('|')
+    if ($line.Length -gt 512 -or $parts.Count -ne 17 -or $records.Count -ge 64) { throw 'Export progress schema' }
+    if ($parts[1] -cnotin @('METADATA_RESOLUTION','RUNTIME_SELECTION','SNAPSHOT_COPY','MANIFEST_FINALIZATION') -or
+        $parts[2] -cnotin @('RUNNING','SUCCEEDED','FAILED')) { throw 'Export progress schema' }
+    $safe = [System.Collections.Generic.List[string]]::new()
+    $safe.Add('EP1'); $safe.Add($parts[1]); $safe.Add($parts[2])
+    for ($index = 3; $index -lt 17; $index++) {
+      $number = 0L
+      if ($parts[$index] -cnotmatch '^(0|[1-9][0-9]{0,15})$' -or
+          -not [long]::TryParse($parts[$index],[ref]$number) -or $number -gt 9007199254740991) { throw 'Export progress schema' }
+      $safe.Add($number.ToString([Globalization.CultureInfo]::InvariantCulture))
+    }
+    $lastStatus = $parts[2]
+    $records.Add([string]::Join('|',$safe))
+  }
+  # On timeout a RUNNING snapshot is useful;it cannot become a success receipt.
+  foreach ($record in $records) { Write-Host $record }
+  if ($RequireSuccess -and ($records.Count -eq 0 -or $lastStatus -cne 'SUCCEEDED')) { throw 'Export progress incomplete' }
+}
 function Run-Bounded([string]$Id,[string]$Exe,[string[]]$Arguments,[int]$Seconds) {
   if (-not [IO.Path]::IsPathFullyQualified($Exe) -or -not [IO.File]::Exists($Exe)) { throw ('Executable unavailable: ' + $Id) }
   if (-not [IO.Directory]::Exists($src)) { throw ('Working directory unavailable: ' + $Id) }
@@ -51,16 +77,21 @@ function Run-Bounded([string]$Id,[string]$Exe,[string[]]$Arguments,[int]$Seconds
   if (-not $p.Start()) { throw ('Launch failed: ' + $Id) }
   $stdout = $p.StandardOutput.ReadToEndAsync()
   $stderr = $p.StandardError.ReadToEndAsync()
-  if (-not $p.WaitForExit($Seconds * 1000)) {
-    $p.Kill($true); $p.WaitForExit(); throw ('Timeout: ' + $Id)
+  $timedOut = -not $p.WaitForExit($Seconds * 1000)
+  if ($timedOut) {
+    $p.Kill($true); $p.WaitForExit()
+    if ($Id -cne 'runtime-export') { throw ('Timeout: ' + $Id) }
   }
   # Do not relay arbitrary dependency output or runner environment.
   if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) { throw ('Unsettled stdio: ' + $Id) }
   $null = $stderr.GetAwaiter().GetResult()
   $text = $stdout.GetAwaiter().GetResult()
+  if ($Id -ceq 'runtime-export') { Publish-ExportProgress $text (-not $timedOut -and $p.ExitCode -eq 0) }
+  if ($timedOut) { throw ('Timeout: ' + $Id) }
   $receipts.Add(@{step=$Id;exit=$p.ExitCode;elapsedMs=$clock.ElapsedMilliseconds})
   Write-Host ('Step ' + $Id + ': exit=' + $p.ExitCode + '; ms=' + $clock.ElapsedMilliseconds)
   if ($p.ExitCode -ne 0) { throw ('Nonzero exit: ' + $Id) }
+  if ($Id -ceq 'runtime-export') { return '' }
   return $text.Trim()
 }
 function Assert-Hash([string]$Path,[string]$Expected) {
