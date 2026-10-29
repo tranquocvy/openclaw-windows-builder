@@ -133,52 +133,21 @@ foreach ($f in @('.openclaw-lifecycle-pending','dist/openclaw-install-guard')) {
 $payload = Join-Path $base 'payload'
 $runtime = Join-Path $payload 'runtime'
 $null = New-Item -ItemType Directory -Path $runtime
-# Conservative candidate closure, NOT a minimal production release.
-# Preserve pnpm topology as DATA; never put archive symlinks/junctions
-# or a host installer/launcher into the exported archive.
+# Select declared runtime packages and built workspace surfaces before copying.
+# Package metadata is data only;no package/Node import,installer or lifecycle is run.
+# Unknown entries,required denied names and unresolved links fail closed.
 $links = [System.Collections.Generic.List[object]]::new()
 $files = [System.Collections.Generic.List[object]]::new()
-$script:bytes = 0L
-function Copy-Candidate([IO.FileSystemInfo]$Item,[int]$Depth=0) {
-  if ($Depth -gt 100 -or ($files.Count + $links.Count) -ge 200000) { throw 'Inventory cap' }
-  $rel = [IO.Path]::GetRelativePath($src,$Item.FullName).Replace('\','/')
-  if ($rel.StartsWith('../') -or [IO.Path]::IsPathRooted($rel)) { throw 'Source path escape' }
-  if ($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-    $target = $Item.ResolveLinkTarget($true)
-    if ($null -eq $target) { throw 'Unresolved package link' }
-    $tr = [IO.Path]::GetRelativePath($src,$target.FullName).Replace('\','/')
-    if ($tr.StartsWith('../') -or [IO.Path]::IsPathRooted($tr)) { throw 'External package link' }
-    $links.Add(@{path=$rel;target=$tr;directory=($target -is [IO.DirectoryInfo])})
-    return
-  }
-  $dst = Join-Path $runtime $rel
-  if ($Item -is [IO.DirectoryInfo]) {
-    $null = New-Item -ItemType Directory -Path $dst -Force
-    foreach ($i in Get-ChildItem -LiteralPath $Item.FullName -Force) {
-      if ($i.Name -in @('.git','.artifacts','.cache')) { continue }
-      Copy-Candidate $i ($Depth+1)
-    }
-  } else {
-    if ($Item.Name -match '^(\.env($|\.)|\.npmrc$|auth\.json$|credentials?\.)') { throw 'Forbidden export filename' }
-    $script:bytes += $Item.Length
-    if ($script:bytes -gt 1GB) { throw 'Unpacked candidate exceeds 1 GiB' }
-    Copy-Item -LiteralPath $Item.FullName -Destination $dst
-    $files.Add(@{path=('runtime/'+$rel);bytes=$Item.Length;sha256=(Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLowerInvariant()})
-  }
-}
-# Source manifest/root helpers plus exact installed Windows closure.
-# No root scripts, personal HOME/state/config, store, Git or CI logs.
-foreach ($d in @('dist','node_modules','packages','extensions')) {
-  Copy-Candidate (Get-Item -LiteralPath (Join-Path $src $d) -Force)
-}
-foreach ($i in Get-ChildItem -LiteralPath $src -File) {
-  if (($i.Extension -in @('.mjs','.mts') -or $i.Name -in @('package.json','LICENSE','THIRD_PARTY_NOTICES.md')) -and $i.Name -ne 'openclaw.mjs') {
-    Copy-Candidate $i
-  }
-}
-foreach ($link in $links) {
-  if (-not (Test-Path -LiteralPath (Join-Path $runtime $link.target))) { throw 'Incomplete package link closure' }
-}
+$python = (Get-Command python.exe -CommandType Application | Select-Object -First 1).Source
+$exportScript = Join-Path $PSScriptRoot 'test_candidate.py'
+$exportPolicy = Join-Path (Split-Path $PSScriptRoot) 'policy/artifact-policy.json'
+$fileManifest = Join-Path $payload 'files.json'
+$linkManifest = Join-Path $payload 'links.json'
+$null = Run-Bounded 'runtime-export' $python @('-I','-B',$exportScript,'--prepare-runtime',
+  '--source',$src,'--destination',$runtime,'--policy',$exportPolicy,
+  '--files',$fileManifest,'--links',$linkManifest) 120
+foreach ($row in @(Get-Content -LiteralPath $fileManifest -Raw | ConvertFrom-Json)) { $files.Add($row) }
+foreach ($row in @(Get-Content -LiteralPath $linkManifest -Raw | ConvertFrom-Json)) { $links.Add($row) }
 # Original bin target intentionally absent: upstream wrapper has
 # automatic runtime/lifecycle recovery paths. CP-B must review an
 # exact no-repair invocation before any host execution is authorized.
