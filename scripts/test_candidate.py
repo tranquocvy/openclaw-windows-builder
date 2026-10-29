@@ -289,7 +289,7 @@ def prepare_runtime(source, destination, policy):
                                         0, False, 2), 'EXPORT_READ_HANDLE')
             fd = msvcrt.open_osfhandle(duplicate.value, os.O_RDONLY | os.O_BINARY)
             with os.fdopen(fd, 'rb') as stream:
-                data = stream.read(policy['maxFileBytes'] + 1)
+                data = stream.read(size + 1)
             need(len(data) == size and not sensitive(data), 'EXPORT_CONTENT_BLOCKED')
             return data
 
