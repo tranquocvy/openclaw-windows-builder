@@ -36,13 +36,26 @@ $childEnv = @{
 # This removes inheritance for launched children, NOT administrator
 # access to the runner agent/token or a network enforcement boundary.
 $receipts = [System.Collections.Generic.List[object]]::new()
-function Publish-ExportProgress([string]$Text,[bool]$RequireSuccess) {
+function Publish-ExportProgress([string]$Text,[bool]$RequireSuccess,[bool]$TimedOut,[int]$ExitCode) {
   # A numeric protocol is reconstructed;never echo child lines or parse errors.
   if ($Text.Length -gt 65536) { throw 'Export progress cap' }
   $records = [System.Collections.Generic.List[string]]::new()
   $lastStatus = ''
+  $errorCode = ''
+  $allowed = @('EXPORT_MISSING_ENTRY','EXPORT_WORKSPACE_SURFACE_UNKNOWN','EXPORT_MISSING_DEPENDENCY',
+    'EXPORT_CONTENT_BLOCKED','EXPORT_FILENAME_BLOCKED','EXPORT_PATH_REJECTED','EXPORT_LINK_REJECTED',
+    'EXPORT_IDENTITY_FAILED','EXPORT_SNAPSHOT_CHANGED','EXPORT_INTEGRITY_FAILED','EXPORT_LIMIT_EXCEEDED',
+    'EXPORT_METADATA_INVALID','EXPORT_PROGRESS_INVALID','EXPORT_CONFIGURATION_INVALID','EXPORT_UNEXPECTED_FAILURE')
   foreach ($line in $Text.Split("`n")) {
+    if ($line.StartsWith('EF1|',[StringComparison]::Ordinal)) {
+      $failure = $line.TrimEnd("`r").Split('|')
+      if ($line.Length -gt 96 -or $failure.Count -ne 2 -or $errorCode -cne '' -or
+          $allowed -cnotcontains $failure[1]) { throw 'Export failure schema' }
+      $errorCode = $failure[1]
+      continue
+    }
     if (-not $line.StartsWith('EP1|',[StringComparison]::Ordinal)) { continue }
+    if ($errorCode -cne '' -or $lastStatus -cin @('SUCCEEDED','FAILED')) { throw 'Export failure binding' }
     $parts = $line.TrimEnd("`r").Split('|')
     if ($line.Length -gt 512 -or $parts.Count -ne 17 -or $records.Count -ge 64) { throw 'Export progress schema' }
     if ($parts[1] -cnotin @('METADATA_RESOLUTION','RUNTIME_SELECTION','SNAPSHOT_COPY','MANIFEST_FINALIZATION') -or
@@ -58,8 +71,21 @@ function Publish-ExportProgress([string]$Text,[bool]$RequireSuccess) {
     $lastStatus = $parts[2]
     $records.Add([string]::Join('|',$safe))
   }
+  # An enum is diagnostic data,not authenticated provenance from the child.
+  # Contradictory success/timeout/terminal records fail before any relay.
+  $startupFailure = $records.Count -eq 0 -and $errorCode -cin @('EXPORT_CONFIGURATION_INVALID','EXPORT_UNEXPECTED_FAILURE')
+  if ($errorCode -cne '' -and ($TimedOut -or $ExitCode -eq 0 -or ($lastStatus -cne 'FAILED' -and -not $startupFailure))) {
+    throw 'Export failure binding'
+  }
+  if (-not $TimedOut -and $ExitCode -ne 0 -and $errorCode -ceq '') { throw 'Export failure incomplete' }
+  if ($lastStatus -ceq 'FAILED' -and -not $TimedOut -and $ExitCode -eq 0) { throw 'Export failure binding' }
+  $relayBytes = 0
+  foreach ($record in $records) { $relayBytes += $record.Length + 1 }
+  if ($errorCode -cne '') { $relayBytes += 5 + $errorCode.Length }
+  if ($relayBytes -gt 32768) { throw 'Export progress cap' }
   # On timeout a RUNNING snapshot is useful;it cannot become a success receipt.
   foreach ($record in $records) { Write-Host $record }
+  if ($errorCode -cne '') { Write-Host ('EF1|' + $errorCode) }
   if ($RequireSuccess -and ($records.Count -eq 0 -or $lastStatus -cne 'SUCCEEDED')) { throw 'Export progress incomplete' }
 }
 function Run-Bounded([string]$Id,[string]$Exe,[string[]]$Arguments,[int]$Seconds) {
@@ -86,7 +112,7 @@ function Run-Bounded([string]$Id,[string]$Exe,[string[]]$Arguments,[int]$Seconds
   if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) { throw ('Unsettled stdio: ' + $Id) }
   $null = $stderr.GetAwaiter().GetResult()
   $text = $stdout.GetAwaiter().GetResult()
-  if ($Id -ceq 'runtime-export') { Publish-ExportProgress $text (-not $timedOut -and $p.ExitCode -eq 0) }
+  if ($Id -ceq 'runtime-export') { Publish-ExportProgress $text (-not $timedOut -and $p.ExitCode -eq 0) $timedOut $p.ExitCode }
   if ($timedOut) { throw ('Timeout: ' + $Id) }
   $receipts.Add(@{step=$Id;exit=$p.ExitCode;elapsedMs=$clock.ElapsedMilliseconds})
   Write-Host ('Step ' + $Id + ': exit=' + $p.ExitCode + '; ms=' + $clock.ElapsedMilliseconds)

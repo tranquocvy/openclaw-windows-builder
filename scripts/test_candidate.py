@@ -16,8 +16,40 @@ import threading
 import time
 
 
+# Public error codes are independent of internal guard names or exception text.
+EXPORT_FAILURE_GROUPS = {
+    'EXPORT_MISSING_ENTRY': ('EXPORT_MISSING_ENTRY', 'EXPORT_MISSING_DIST', 'EXPORT_MISSING_BIN', 'EXPORT_MISSING_PACKAGE_FILE'),
+    'EXPORT_WORKSPACE_SURFACE_UNKNOWN': ('EXPORT_WORKSPACE_SURFACE_UNKNOWN', 'EXPORT_WORKSPACE_GLOB_UNKNOWN'),
+    'EXPORT_MISSING_DEPENDENCY': ('EXPORT_MISSING_DEPENDENCY',),
+    'EXPORT_CONTENT_BLOCKED': ('EXPORT_CONTENT_BLOCKED',),
+    'EXPORT_FILENAME_BLOCKED': ('Forbidden export filename', 'FORBIDDEN_NAME'),
+    'EXPORT_PATH_REJECTED': ('PATH', 'EXPORT_PATH_ESCAPE', 'EXPORT_PATH_CONTENT_BLOCKED', 'EXPORT_ROOT_ALIAS', 'EXPORT_CASE_COLLISION',
+                             'EXPORT_LOCAL_VOLUME_REQUIRED', 'EXPORT_ROOTS', 'EXPORT_MANIFEST_PATH', 'EXPORT_MANIFEST_COLLISION'),
+    'EXPORT_LINK_REJECTED': ('EXPORT_HARDLINK', 'EXPORT_REPARSE_ANCESTOR', 'EXPORT_UNDECLARED_REPARSE',
+                             'EXPORT_LINK_ALIAS', 'EXPORT_LINK_CHAIN', 'EXPORT_LINK_DEVICE_UNKNOWN',
+                             'EXPORT_LINK_SHADOW', 'EXPORT_LINK_TARGET'),
+    'EXPORT_IDENTITY_FAILED': ('EXPORT_LOCK_FAILED', 'EXPORT_IDENTITY', 'EXPORT_OBJECT_TYPE',
+                               'EXPORT_CANONICAL_PATH', 'EXPORT_READ_HANDLE', 'EXPORT_WRITE_HANDLE'),
+    'EXPORT_SNAPSHOT_CHANGED': ('EXPORT_CHANGED_SNAPSHOT',),
+    'EXPORT_INTEGRITY_FAILED': ('EXPORT_WRITE_HASH',),
+    'EXPORT_LIMIT_EXCEEDED': ('FILE_CAP', 'METADATA_CAP', 'EXPORT_CAP', 'EXPORT_DEPTH'),
+    'EXPORT_METADATA_INVALID': ('DUPLICATE_JSON_KEY', 'EXPORT_PACKAGE_METADATA', 'EXPORT_PACKAGE_IDENTITY_UNKNOWN',
+                                'EXPORT_PACKAGE_ROOT_UNKNOWN', 'EXPORT_DEPENDENCIES', 'EXPORT_DEPENDENCY_NAME',
+                                'EXPORT_BIN_METADATA', 'EXPORT_BIN_NAME', 'EXPORT_PLUGIN_METADATA',
+                                'EXPORT_DYNAMIC_ENTRY_UNKNOWN', 'EXPORT_ENTRY_UNKNOWN', 'EXPORT_ENTRY_ALTERNATIVES_UNKNOWN'),
+    'EXPORT_PROGRESS_INVALID': ('EXPORT_PROGRESS_CAP', 'EXPORT_PROGRESS_SCHEMA', 'EXPORT_PROGRESS_UNSETTLED'),
+    'EXPORT_CONFIGURATION_INVALID': ('WINDOWS_EXPORT_REQUIRED', 'EXPORT_ARGUMENTS'),
+    'EXPORT_UNEXPECTED_FAILURE': (),
+}
+EXPORT_FAILURE_CODES = frozenset(EXPORT_FAILURE_GROUPS)
+EXPORT_FAILURE_GUARDS = {guard: code for code, guards in EXPORT_FAILURE_GROUPS.items() for guard in guards}
+
+
 class Rejected(Exception):
-    pass
+    def __init__(self, guard):
+        super().__init__(guard)
+        self.export_code = (EXPORT_FAILURE_GUARDS.get(guard, 'EXPORT_UNEXPECTED_FAILURE')
+                            if type(guard) is str else 'EXPORT_UNEXPECTED_FAILURE')
 
 
 def need(condition, category):
@@ -1376,13 +1408,17 @@ if __name__ == '__main__':
             print('RUNTIME_EXPORT_TEST_FAILED; no raw exception output')
             raise SystemExit(1)
     elif sys.argv[1:2] == ['--prepare-runtime']:
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--prepare-runtime', action='store_true')
-        for key in ('source', 'destination', 'policy', 'files', 'links'):
-            parser.add_argument('--' + key, required=True)
-        args = parser.parse_args()
-        progress = ExportProgress(sys.stdout)
+        class ExportArgumentParser(argparse.ArgumentParser):
+            def error(self, message):
+                raise Rejected('EXPORT_ARGUMENTS')
+        progress = None
         try:
+            parser = ExportArgumentParser()
+            parser.add_argument('--prepare-runtime', action='store_true')
+            for key in ('source', 'destination', 'policy', 'files', 'links'):
+                parser.add_argument('--' + key, required=True)
+            args = parser.parse_args()
+            progress = ExportProgress(sys.stdout)
             policy = json.loads(Path(args.policy).read_text(encoding='utf-8'))
             base = Path(args.destination).absolute().parent
             need(Path(args.files).absolute() == base / 'files.json' and
@@ -1390,13 +1426,16 @@ if __name__ == '__main__':
             rows, links = prepare_runtime(args.source, args.destination, policy, progress)
             progress.finish('SUCCEEDED')
             print('Runtime export selected; qualification remains required')
-        except Rejected as exc:
-            progress.finish('FAILED')
-            print('RUNTIME_EXPORT_REJECTED: ' + str(exc))
-            raise SystemExit(1)
-        except Exception:
-            progress.finish('FAILED')
-            print('RUNTIME_EXPORT_REJECTED; no raw exception output')
+        except Exception as exc:
+            code = exc.export_code if type(exc) is Rejected else 'EXPORT_UNEXPECTED_FAILURE'
+            if type(code) is not str or code not in EXPORT_FAILURE_CODES:
+                code = 'EXPORT_UNEXPECTED_FAILURE'
+            try:
+                if progress is not None:
+                    progress.finish('FAILED')
+            except Exception:
+                code = 'EXPORT_UNEXPECTED_FAILURE'
+            print('EF1|' + code, flush=True)
             raise SystemExit(1)
     else:
         raise SystemExit(main())
