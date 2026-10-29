@@ -433,6 +433,17 @@ def prepare_runtime(source, destination, policy):
                 if field != 'exports' and isinstance(value, str) and not value.startswith('./'):
                     value = './' + value
                 walk(value)
+        plugin = obj.get('openclaw')
+        if plugin is not None:
+            need(isinstance(plugin, dict), 'EXPORT_PLUGIN_METADATA')
+            if 'extensions' in plugin:
+                need(isinstance(plugin['extensions'], list), 'EXPORT_PLUGIN_METADATA')
+                for entry in plugin['extensions']:
+                    need(isinstance(entry, str), 'EXPORT_PLUGIN_METADATA')
+                    walk(entry)
+            if 'setupEntry' in plugin:
+                need(isinstance(plugin['setupEntry'], str), 'EXPORT_PLUGIN_METADATA')
+                walk(plugin['setupEntry'])
 
     def package(directory):
         rel = relative(directory)
@@ -767,6 +778,22 @@ def test_runtime_export():
             else:raise Rejected('SNAPSHOT_NOT_REJECTED')
         need(changed[0] and not (destination.parent/'files.json').exists(),'FAILED_SNAPSHOT_PUBLISHED')
         reports.append({'case':'changed-source-snapshot','status':'LOCAL_RUNTIME_VERIFIED','cleanup':True})
+    def built_plugin(o,s,d,p):
+        p('dist/extensions/synthetic-plugin/package.json',
+          {'name':'synthetic-plugin','openclaw':{'extensions':['./index.js'],'setupEntry':'./setup.js'}})
+        p('dist/extensions/synthetic-plugin/index.js','// synthetic compiled plugin')
+        p('dist/extensions/synthetic-plugin/setup.js','// synthetic compiled setup')
+    reports.append(run('compiled-plugin-metadata-entries',built_plugin))
+    def missing_plugin(o,s,d,p):
+        built_plugin(o,s,d,p)
+        p('dist/extensions/synthetic-plugin/package.json',
+          {'openclaw':{'extensions':['./missing.js']}})
+    reports.append(run('missing-openclaw-plugin-entry',missing_plugin,'EXPORT_MISSING_ENTRY'))
+    def missing_setup(o,s,d,p):
+        built_plugin(o,s,d,p)
+        p('dist/extensions/synthetic-plugin/package.json',
+          {'openclaw':{'extensions':['./index.js'],'setupEntry':'./missing-setup.js'}})
+    reports.append(run('missing-openclaw-setup-entry',missing_setup,'EXPORT_MISSING_ENTRY'))
     # Native payload/link topology plus actual ZIP validator;no real native executable is run.
     with fixture() as (owned,source,destination,put):
         native = base_policy['nativeOwners'][1]
