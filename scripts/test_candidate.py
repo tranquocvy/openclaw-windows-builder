@@ -18,7 +18,7 @@ import time
 
 # Public error codes are independent of internal guard names or exception text.
 EXPORT_FAILURE_GROUPS = {
-    'EXPORT_MISSING_ENTRY': ('EXPORT_MISSING_ENTRY', 'EXPORT_MISSING_DIST', 'EXPORT_MISSING_BIN', 'EXPORT_MISSING_PACKAGE_FILE'),
+    'EXPORT_MISSING_ENTRY': ('EXPORT_MISSING_ENTRY', 'EXPORT_MISSING_DIST', 'EXPORT_MISSING_BIN', 'EXPORT_MISSING_PACKAGE_FILE', 'EXPORT_PROFILE_REQUIRED'),
     'EXPORT_WORKSPACE_SURFACE_UNKNOWN': ('EXPORT_WORKSPACE_SURFACE_UNKNOWN', 'EXPORT_WORKSPACE_GLOB_UNKNOWN'),
     'EXPORT_MISSING_DEPENDENCY': ('EXPORT_MISSING_DEPENDENCY',),
     'EXPORT_CONTENT_BLOCKED': ('EXPORT_CONTENT_BLOCKED',),
@@ -36,7 +36,7 @@ EXPORT_FAILURE_GROUPS = {
     'EXPORT_METADATA_INVALID': ('DUPLICATE_JSON_KEY', 'EXPORT_PACKAGE_METADATA', 'EXPORT_PACKAGE_IDENTITY_UNKNOWN',
                                 'EXPORT_PACKAGE_ROOT_UNKNOWN', 'EXPORT_DEPENDENCIES', 'EXPORT_DEPENDENCY_NAME',
                                 'EXPORT_BIN_METADATA', 'EXPORT_BIN_NAME', 'EXPORT_PLUGIN_METADATA',
-                                'EXPORT_DYNAMIC_ENTRY_UNKNOWN', 'EXPORT_ENTRY_UNKNOWN', 'EXPORT_ENTRY_ALTERNATIVES_UNKNOWN'),
+                                'EXPORT_DYNAMIC_ENTRY_UNKNOWN', 'EXPORT_ENTRY_UNKNOWN', 'EXPORT_ENTRY_ALTERNATIVES_UNKNOWN', 'EXPORT_PROFILE_METADATA'),
     'EXPORT_PROGRESS_INVALID': ('EXPORT_PROGRESS_CAP', 'EXPORT_PROGRESS_SCHEMA', 'EXPORT_PROGRESS_UNSETTLED'),
     'EXPORT_CONFIGURATION_INVALID': ('WINDOWS_EXPORT_REQUIRED', 'EXPORT_ARGUMENTS'),
     'EXPORT_UNEXPECTED_FAILURE': (),
@@ -99,6 +99,108 @@ def native_owner(path, policy):
     return None
 
 
+
+# Deliberately restricted packaging contract,not an upstream distribution.
+RESTRICTED_PROFILE = 'restricted-control-plane-v1'
+PROFILE_PATH = 'dist/restricted-control-plane.json'
+UPSTREAM_METADATA_PATH = 'dist/upstream-package.json'
+REQUIRED_GATEWAY_FILES = ('dist/entry.js', 'dist/runtime-dependency-ownership.json', 'cli-invocation.mjs', 'cli-parent-lifetime.mjs', 'cli-root-options.mjs', 'docker-entrypoint.mjs', 'gateway-prewarm.mjs', 'gateway-run-argv.mjs', 'gateway-shutdown-budget.mjs', 'node-compile-cache.mjs', 'node-host-launcher.mjs', 'node-runtime-env.mjs', 'node-runtime-recovery.mjs', 'node-runtime-update.mjs', 'node-sqlite-capabilities.mjs', 'node-sqlite.mjs', 'node-version.mjs', 'runtime-process-bootstrap.generated.mjs', 'runtime-process-scripts.generated.mjs', 'standalone-runtime-profile.mjs', 'worker-heap-flag.mjs')
+UNSUPPORTED_ROOT_FIELDS = ('main', 'module', 'bin', 'types', 'typings', 'scripts',
+                           'devDependencies', 'files', 'publishConfig', 'packageManager')
+
+
+def project_package(original, source_bytes):
+    """Pure deterministic projection. Original declarations are checked separately."""
+    import copy
+    projected = copy.deepcopy(original)
+    removed = {field: 'UNSUPPORTED_DISTRIBUTION_SURFACE' for field in UNSUPPORTED_ROOT_FIELDS if field in projected}
+    for field in UNSUPPORTED_ROOT_FIELDS:
+        projected.pop(field, None)
+    exports = projected.get('exports', {})
+    need(isinstance(exports, dict), 'EXPORT_PACKAGE_METADATA')
+    for key in ('.', './cli-entry'):
+        if key in exports:
+            if key == './cli-entry':
+                need(exports[key] == './openclaw.mjs', 'EXPORT_ENTRY_UNKNOWN')
+            removed['exports:' + key] = 'UNSUPPORTED_LIBRARY_OR_WRAPPER_ENTRY'
+            del exports[key]
+    def runtime_conditions(value):
+        if isinstance(value, dict):
+            return {k: runtime_conditions(v) for k, v in value.items() if k != 'types'}
+        if isinstance(value, list):
+            return [runtime_conditions(v) for v in value]
+        return value
+    if exports:
+        if any(isinstance(v, dict) and 'types' in v for v in exports.values()):
+            removed['exports:types-conditions'] = 'NO_TYPING_SURFACE_SUPPORTED'
+        projected['exports'] = runtime_conditions(exports)
+    else:
+        projected.pop('exports', None)
+    projected['description'] = 'Restricted control-plane artifact;not a full OpenClaw distribution'
+    projected['private'] = True
+    projected['restrictedArtifactProfile'] = RESTRICTED_PROFILE
+    encode = lambda value: (json.dumps(value, sort_keys=True, separators=(',', ':'),
+                                      ensure_ascii=True) + '\n').encode('utf-8')
+    data = encode(projected)
+    provenance = {'schema': 1, 'profile': RESTRICTED_PROFILE,
+        'upstreamPackageSha256': hashlib.sha256(source_bytes).hexdigest(),
+        'projectedPackageSha256': hashlib.sha256(data).hexdigest(),
+        'upstreamMetadata': UPSTREAM_METADATA_PATH,
+        'requiredFiles': list(REQUIRED_GATEWAY_FILES), 'removed': removed,
+        'entry': 'dist/entry.js', 'supported': ['foreground-gateway-smoke'],
+        'runtimeQualification': 'UNRUN', 'completeRuntimeClosure': False,
+        'distribution': False, 'wrapperExported': False}
+    return data, encode(provenance)
+
+
+
+def literal_references(data):
+    """Conservative literal-reference screen,NOT an ECMAScript parser/closure proof.
+    May reject literals in comments/strings;computed/aliased loading stays unproved.
+    """
+    expressions = [
+        ('esm', rb"""\bfrom\s*(['"])([^'"\r\n]{1,4096})\1"""),
+        ('esm', rb"""\bimport\s*(['"])([^'"\r\n]{1,4096})\1"""),
+        ('esm', rb"""\bimport\s*\(\s*(['"])([^'"\r\n]{1,4096})\1\s*[,)]"""),
+        ('require', rb"""\brequire(?:\.resolve)?\s*\(\s*(['"])([^'"\r\n]{1,4096})\1\s*[,)]"""),
+        ('asset', rb"""\bnew\s+URL\s*\(\s*(['"])([^'"\r\n]{1,4096})\1\s*,"""),
+    ]
+    for kind, expression in expressions:
+        for match in re.finditer(expression, data):
+            value = match[2]
+            if value.startswith((b'./', b'../')):
+                need(b'\\' not in value and b'?' not in value and b'#' not in value,
+                     'EXPORT_DYNAMIC_ENTRY_UNKNOWN')
+                try:
+                    text = value.decode('utf-8')
+                except UnicodeError:
+                    raise Rejected('EXPORT_ENTRY_UNKNOWN') from None
+                yield text, kind
+
+
+def check_literal_edges(edges, inventory, aliases):
+    """Resolve screened root runtime file references through the admitted link data."""
+    import posixpath
+    names = {p.casefold() for p in inventory}
+    for origin, reference, kind in edges:
+        target = posixpath.normpath(posixpath.join(posixpath.dirname(origin), reference))
+        if target == '.' and kind == 'asset':
+            continue
+        safe_path(target)
+        key = target.casefold()
+        for alias in aliases.values():
+            prefix = alias['path'].casefold()
+            if key == prefix or key.startswith(prefix + '/'):
+                key = alias['target'].casefold() + key[len(prefix):]
+                break
+        candidates = [key]
+        if kind == 'require':
+            candidates += [key + x for x in ('.js', '.json', '.node', '/index.js', '/index.json', '/index.node')]
+        need(any(p in names for p in candidates) or
+             (kind == 'asset' and any(p.startswith(key.rstrip('/') + '/') for p in names)),
+             'EXPORT_MISSING_ENTRY')
+
+
 def validate_archive(stream, policy, workflow_sha, run_id):
     with zipfile.ZipFile(stream) as archive:
         need(not archive.comment, 'ARCHIVE_COMMENT')
@@ -110,6 +212,7 @@ def validate_archive(stream, policy, workflow_sha, run_id):
         need(len(entries) <= policy['maxEntries'], 'ENTRY_CAP')
         need(sum(i.file_size for i in entries) <= policy['maxExpandedBytes'], 'EXPANDED_CAP')
         names, content, hashes, binaries, scripts = {}, {}, {}, [], 0
+        literal_edges = set()
         for item in entries:
             need(not item.comment, 'ENTRY_COMMENT')
             path = safe_path(item.filename)
@@ -137,7 +240,8 @@ def validate_archive(stream, policy, workflow_sha, run_id):
             need(path != 'runtime/openclaw.mjs', 'ACTIVE_WRAPPER')
             with archive.open(item) as source:
                 digest, count, overlap, head = hashlib.sha256(), 0, b'', b''
-                is_metadata = path in ('files.json', 'links.json', 'receipt.json')
+                is_metadata = path in ('files.json', 'links.json', 'receipt.json', 'runtime/package.json',
+                                        'runtime/' + PROFILE_PATH, 'runtime/' + UPSTREAM_METADATA_PATH)
                 buf = bytearray() if is_metadata else None
                 while True:
                     chunk = source.read(1024 * 1024)
@@ -148,7 +252,12 @@ def validate_archive(stream, policy, workflow_sha, run_id):
                     count += len(chunk)
                     need(count <= item.file_size and count <= policy['maxFileBytes'], 'FILE_CAP')
                     need(not sensitive(overlap + chunk), 'SENSITIVE_PATTERN')
-                    overlap = chunk[-2048:]
+                    if (path.startswith('runtime/dist/') or
+                            (path.startswith('runtime/') and path.count('/') == 1)) and path.endswith(('.js', '.mjs', '.cjs')):
+                        literal_edges.update((path[len('runtime/'):], ref, kind)
+                                             for ref, kind in literal_references(overlap + chunk))
+                        need(len(literal_edges) <= policy['maxEntries'], 'EXPORT_CAP')
+                    overlap = chunk[-12288:]
                     digest.update(chunk)
                     if buf is not None:
                         need(count <= 32 * 1024 * 1024, 'METADATA_CAP')
@@ -157,6 +266,10 @@ def validate_archive(stream, policy, workflow_sha, run_id):
                 hashes[path] = (count, digest.hexdigest())
                 if buf is not None:
                     content[path] = json.loads(buf.decode('utf-8-sig'), object_pairs_hook=strict_object)
+                    if path == 'runtime/package.json':
+                        projected_bytes = bytes(buf)
+                    if path == 'runtime/' + UPSTREAM_METADATA_PATH:
+                        upstream_bytes = bytes(buf)
             suffix = Path(path).suffix.lower()
             need(head not in (b'\x7fELF', b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf') and suffix not in ('.so', '.dylib'), 'FOREIGN_NATIVE')
             if head[:2] == b'MZ' or suffix in ('.exe', '.dll', '.node'):
@@ -171,7 +284,8 @@ def validate_archive(stream, policy, workflow_sha, run_id):
             parts = path.split('/')
             need(not any('/'.join(parts[:n]) in hashes for n in range(1, len(parts))), 'PATH_SHADOW')
         required = {'files.json', 'links.json', 'receipt.json', 'node/node.exe', 'node/LICENSE',
-                    'runtime/package.json', 'runtime/dist/entry.js', 'runtime/dist/runtime-dependency-ownership.json'}
+                    'runtime/package.json', 'runtime/dist/entry.js', 'runtime/dist/runtime-dependency-ownership.json',
+                    'runtime/' + PROFILE_PATH, 'runtime/' + UPSTREAM_METADATA_PATH}
         need(required <= hashes.keys(), 'MISSING_OUTPUT')
         need(hashes['node/node.exe'][1] == policy['nodeExeSha256'], 'NODE_HASH')
         rows = content['files.json']
@@ -203,6 +317,41 @@ def validate_archive(stream, policy, workflow_sha, run_id):
         for p, target in aliases.values():
             need(not any(p.casefold().startswith(a + '/') for a in aliases if a != p.casefold()), 'LINK_NESTING')
             need(not any(target.casefold() == a or target.casefold().startswith(a + '/') for a in aliases), 'LINK_CHAIN')
+        check_literal_edges(literal_edges,
+                            [p[len('runtime/'):] for p in actual if p.startswith('runtime/')],
+                            {k: {'path': p[len('runtime/'):], 'target': target[len('runtime/'):]}
+                             for k, (p, target) in aliases.items()})
+        original = content['runtime/' + UPSTREAM_METADATA_PATH]
+        projected, profile = project_package(original, upstream_bytes)
+        need(hashes['runtime/' + UPSTREAM_METADATA_PATH][1] == policy['sourceHashes']['package.json'],
+             'EXPORT_PROFILE_METADATA')
+        need(projected == projected_bytes and
+             json.loads(profile) == content['runtime/' + PROFILE_PATH], 'EXPORT_PROFILE_METADATA')
+        need(all('runtime/' + p in actual for p in REQUIRED_GATEWAY_FILES), 'EXPORT_PROFILE_REQUIRED')
+        import fnmatch
+        def original_target(value, condition=None):
+            if condition == 'types':
+                return
+            if isinstance(value, str):
+                need(value.startswith('./'), 'EXPORT_PROFILE_METADATA')
+                marker = '_export_wildcard_'
+                path = safe_path(value[2:].replace('*', marker)).replace(marker, '*')
+                need(any(fnmatch.fnmatchcase(p, 'runtime/' + path) for p in actual),
+                     'EXPORT_PROFILE_REQUIRED')
+            elif isinstance(value, dict):
+                for key, target in value.items():
+                    original_target(target, key)
+            else:
+                need(value is None, 'EXPORT_PROFILE_METADATA')
+        # Independently check original entries,not just the projected advertisement.
+        for field in ('main', 'module', 'exports', 'imports'):
+            value = original.get(field)
+            if field == 'exports' and isinstance(value, dict):
+                value = {k:v for k,v in value.items() if k != './cli-entry'}
+            if field != 'exports' and isinstance(value, str) and not value.startswith('./'):
+                value = './' + value
+            original_target(value)
+
         r = content['receipt.json']
         need(r['source'] == policy['source'] and r['tree'] == policy['sourceTree'], 'SOURCE_PIN')
         need(r['sourceHashes'] == policy['sourceHashes'], 'SOURCE_HASH')
@@ -305,6 +454,7 @@ def prepare_runtime(source, destination, policy, progress=None):
     import os
     import msvcrt
     need(os.name == 'nt', 'WINDOWS_EXPORT_REQUIRED')
+    need('openclaw.mjs' not in policy['rootFiles'], 'EXPORT_ENTRY_UNKNOWN')
     root = Path(os.path.abspath(source))
     output = Path(os.path.abspath(destination))
     need(bool(re.fullmatch(r'[a-zA-Z]:', root.drive)) and
@@ -333,6 +483,12 @@ def prepare_runtime(source, destination, policy, progress=None):
     current.restype = wintypes.HANDLE
     files, aliases, packages, identities, deferred = {}, {}, set(), {}, {}
     total = 0
+    literal_edges = set()
+
+    def record_runtime_edges(rel, data):
+        if (rel.startswith('dist/') or '/' not in rel) and rel.endswith(('.js', '.mjs', '.cjs')):
+            literal_edges.update((rel, ref, kind) for ref, kind in literal_references(data))
+            need(len(literal_edges) <= policy['maxEntries'], 'EXPORT_CAP')
 
     def phase_operation(name):
         def decorate(fn):
@@ -444,6 +600,7 @@ def prepare_runtime(source, destination, policy, progress=None):
             need(files[key]['rel'] == rel, 'EXPORT_CASE_COLLISION')
             return
         data = read(path)
+        record_runtime_edges(rel, data)
         total += len(data)
         need(total <= policy['maxExpandedBytes'] and (len(files) + len(aliases)) < policy['maxEntries'], 'EXPORT_CAP')
         files[key] = {'rel': rel, 'path': path, 'bytes': len(data),
@@ -666,7 +823,15 @@ def prepare_runtime(source, destination, policy, progress=None):
         tree(root / 'dist')
         for needed in ('dist/entry.js', 'dist/runtime-dependency-ownership.json'):
             need(needed.casefold() in files, 'EXPORT_MISSING_ENTRY')
-        entries(root, root_obj)
+        # Check ORIGINAL runtime declarations before dropping advertised surfaces.
+        # Only the intentionally unsupported exact wrapper edge is excluded.
+        import copy
+        declared = copy.deepcopy(root_obj)
+        original_exports = declared.get('exports')
+        if isinstance(original_exports, dict) and './cli-entry' in original_exports:
+            need(original_exports['./cli-entry'] == './openclaw.mjs', 'EXPORT_ENTRY_UNKNOWN')
+            del original_exports['./cli-entry']
+        entries(root, declared)
         declared_dependencies(root, root_obj)
         # Generated built plugin manifests own their dependencies,not source plugin manifests.
         for item in list(files.values()):
@@ -681,6 +846,38 @@ def prepare_runtime(source, destination, policy, progress=None):
             target = alias['target'].casefold()
             need(any(k.startswith(target + '/') for k in files), 'EXPORT_LINK_TARGET')
             need(not any(target == a or target.startswith(a + '/') for a in aliases), 'EXPORT_LINK_CHAIN')
+        check_literal_edges(literal_edges, [x['rel'] for x in files.values()], aliases)
+        # Required Gateway files are independent of editable package entry declarations.
+        need(all(p.casefold() in files for p in REQUIRED_GATEWAY_FILES), 'EXPORT_PROFILE_REQUIRED')
+        ownership_data = read(root / 'dist/runtime-dependency-ownership.json')
+        need(len(ownership_data) <= 1024 * 1024, 'METADATA_CAP')
+        ownership = json.loads(ownership_data, object_pairs_hook=strict_object)
+        need(isinstance(ownership, dict) and isinstance(ownership.get('chunks'), dict),
+             'EXPORT_PROFILE_METADATA')
+        for chunk, owner in ownership['chunks'].items():
+            safe_path(chunk)
+            rel = 'dist/' + chunk
+            need(isinstance(owner, dict) and isinstance(owner.get('sha256'), str) and
+                 bool(re.fullmatch('[a-f0-9]{64}', owner['sha256'])) and
+                 isinstance(owner.get('extensions'), list) and
+                 all(isinstance(e, str) and bool(re.fullmatch('[a-z0-9][a-z0-9-]*', e))
+                     for e in owner['extensions']) and
+                 len(set(owner['extensions'])) == len(owner['extensions']), 'EXPORT_PROFILE_METADATA')
+            need(rel.casefold() in files, 'EXPORT_MISSING_ENTRY')
+            need(files[rel.casefold()]['sha256'] == owner['sha256'], 'EXPORT_WRITE_HASH')
+        source_metadata = read(root / 'package.json')
+        projected_metadata, profile_metadata = project_package(root_obj, source_metadata)
+        generated = {PROFILE_PATH: profile_metadata, UPSTREAM_METADATA_PATH: source_metadata}
+        for rel in generated:
+            safe_path(rel)
+            need(not os.path.lexists(root / rel) and rel.casefold() not in files and
+                 rel.casefold() not in aliases, 'EXPORT_MANIFEST_COLLISION')
+        total += len(projected_metadata) - len(source_metadata) + sum(map(len, generated.values()))
+        need(total <= policy['maxExpandedBytes'] and len(files) + len(aliases) + len(generated) <
+             policy['maxEntries'], 'EXPORT_CAP')
+        need(all(len(data) <= policy['maxFileBytes'] and len(data) <= 32 * 1024 * 1024 and
+                 not sensitive(data) for data in [projected_metadata, *generated.values()]),
+             'EXPORT_CONTENT_BLOCKED')
         # No payload writes until selection,required edges and content checks all pass.
         if progress is not None:
             progress.set_phase('SNAPSHOT_COPY')
@@ -689,6 +886,10 @@ def prepare_runtime(source, destination, policy, progress=None):
             need(hashlib.sha256(data).hexdigest() == item['sha256'], 'EXPORT_CHANGED_SNAPSHOT')
             if progress is not None:
                 progress.add(hashes=1)
+            if item['rel'] == 'package.json':
+                data = projected_metadata
+                item['bytes'] = len(data)
+                item['sha256'] = hashlib.sha256(data).hexdigest()
             dst = output / item['rel']
             parent = output
             for part in item['rel'].split('/')[:-1]:
@@ -702,6 +903,13 @@ def prepare_runtime(source, destination, policy, progress=None):
             write_new(dst, data, item['sha256'])
             if progress is not None:
                 progress.add(copiedFiles=1, copiedBytes=len(data))
+        for rel, data in generated.items():
+            # dist already exists from the required entry copy;locked writer checks ancestors.
+            write_new(output / rel, data, hashlib.sha256(data).hexdigest())
+            files[rel.casefold()] = {'rel': rel, 'bytes': len(data),
+                                    'sha256': hashlib.sha256(data).hexdigest()}
+            if progress is not None:
+                progress.add(files=1, copiedFiles=1, copiedBytes=len(data), hashes=1)
         if progress is not None:
             progress.set_phase('MANIFEST_FINALIZATION')
         rows = [{'path': 'runtime/' + x['rel'], 'bytes': x['bytes'], 'sha256': x['sha256']}
@@ -756,6 +964,8 @@ def test_runtime_export():
                                  'devDependencies':{'dev-only':'1'}})
             put('dist/entry.js', '// synthetic compiled entry')
             put('dist/runtime-dependency-ownership.json', {'chunks':{}})
+            for required in REQUIRED_GATEWAY_FILES[2:]:
+                put(required, '// synthetic root helper;never executed')
             put('node_modules/runtime-dep/package.json', {'name':'runtime-dep','main':'./index.js'})
             put('node_modules/runtime-dep/index.js', '// synthetic runtime module')
             put('node_modules/dev-only/credentials.ts', '// excluded synthetic development source')
@@ -959,6 +1169,7 @@ def test_runtime_export():
         junction(source/'node_modules'/name,source/folder,owned)
         put('package.json',{'dependencies':{'runtime-dep':'1',name:'1'}})
         policy=copy.deepcopy(base_policy)
+        policy['sourceHashes']['package.json']=real_sha((source/'package.json').read_bytes()).hexdigest()
         rows,links=prepare_runtime(source,destination,policy)
         need(any(x['path'].endswith('/native.node') for x in rows) and len(links)==1,'NATIVE_OR_LINK_LOST')
         payload=destination.parent
@@ -1002,7 +1213,8 @@ def test_runtime_export():
     mutant=original.replace("        need(not any(deny.search(part) for part in rel.split('/')), 'Forbidden export filename')\n",'')
     mutant=mutant.replace('        safe_path(rel)\n','')  # Bypass redundant filename defence too.
     need(mutant!=original,'MUTATION_NOT_APPLIED')
-    namespace={k:globals()[k] for k in ['Path','need','Rejected','strict_object','safe_path','sensitive','hashlib','re','json']}
+    namespace={k:globals()[k] for k in ['Path','need','Rejected','strict_object','safe_path','sensitive','hashlib','re','json',
+        'REQUIRED_GATEWAY_FILES','PROFILE_PATH','UPSTREAM_METADATA_PATH','project_package','literal_references','check_literal_edges']}
     exec(compile(mutant,'<synthetic-production-deny-mutant>','exec'),namespace)
     try:
         run('mutated-production-name-guard',
@@ -1019,7 +1231,8 @@ def test_runtime_export():
     # Primary regex-only mutation is also detected before relying on the redundant name gate.
     primary=re.sub(r"deny = re\.compile\(r'[^']+', re\.I\)", "deny = re.compile(r'(?!)', re.I)", original, count=1)
     need(primary!=original,'MUTATION_NOT_APPLIED')
-    namespace={k:globals()[k] for k in ['Path','need','Rejected','strict_object','safe_path','sensitive','hashlib','re','json']}
+    namespace={k:globals()[k] for k in ['Path','need','Rejected','strict_object','safe_path','sensitive','hashlib','re','json',
+        'REQUIRED_GATEWAY_FILES','PROFILE_PATH','UPSTREAM_METADATA_PATH','project_package','literal_references','check_literal_edges']}
     exec(compile(primary,'<synthetic-primary-rule-mutant>','exec'),namespace)
     try:
         run('mutated-primary-deny-predicate',

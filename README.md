@@ -67,3 +67,36 @@ files, then obtain explicit artifact-bound runtime approval. Normal loopback-onl
 Gateway smoke requires its own synthetic profile, no-repair entry qualification,
 process-tree egress boundary, deadlines and shutdown reconciliation. No worker/model
 activation follows from a successful build or consistency check.
+
+## Restricted control-plane artifact contract
+
+The export uses `restricted-control-plane-v1`, supporting only a proposed
+foreground Gateway smoke scope: loopback, synthetic HOME/state/config,
+health/readiness and controlled shutdown. It is **not a full OpenClaw distribution**.
+The proposed upstream-supported entry is the bundled Node executable with
+`runtime/dist/entry.js gateway run --bind loopback --tailscale off --allow-unconfigured`.
+This is documentation, not an executable launcher or host execution permission.
+An artifact-bound independent review must qualify the exact invocation/environment
+and no-repair conditions before use. Do not use other CLI/library/model/worker,
+update, install, service or onboarding commands.
+
+Root package metadata is projected only in the export. Original metadata is
+preserved at `runtime/dist/upstream-package.json`; deterministic projection and
+hashes/removal reasons are recorded at `runtime/dist/restricted-control-plane.json`.
+Root main/module/bin/type declarations, package scripts and distribution tooling
+metadata are removed. Root library and cli-entry exports are removed; runtime
+plugin SDK exports (without type conditions), package imports, dependencies,
+engines, package identity and upstream database schema metadata are retained.
+The wrapper remains excluded. Entire selected dist and declared runtime package
+units remain subject to the unchanged entry/dependency/content/link gates.
+Original runtime entry declarations are validated before projection (excluding
+only the exact unsupported wrapper);Gateway entry obligations are independent.
+Deleting advertised metadata is not evidence of executable runtime closure.
+An additive conservative literal-reference check rejects unresolved relative
+import/require/new-URL references in selected root helpers and dist JavaScript;
+the ZIP gate repeats it without execution. It is not a JavaScript parser,may
+reject references in comments/strings,and cannot prove computed/aliased or
+dependency-native loading. Unknown runtime closure never grants host admission.
+Dynamic/undeclared imports, platform-native loading and actual Gateway behavior
+remain unverified until separately authorized CI/independent runtime tests.
+A package/ZIP contract pass never promotes this QUARANTINED_CANDIDATE.
