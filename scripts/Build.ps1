@@ -42,12 +42,25 @@ function Publish-ExportProgress([string]$Text,[bool]$RequireSuccess,[bool]$Timed
   $records = [System.Collections.Generic.List[string]]::new()
   $lastStatus = ''
   $errorCode = ''
+  $originRecord = ''
   $allowed = @('EXPORT_MISSING_ENTRY','EXPORT_WORKSPACE_SURFACE_UNKNOWN','EXPORT_MISSING_DEPENDENCY',
     'EXPORT_CONTENT_BLOCKED','EXPORT_READ_LENGTH_MISMATCH','EXPORT_CONTENT_PATTERN_MATCH',
     'EXPORT_GENERATED_FILE_LIMIT','EXPORT_GENERATED_METADATA_LIMIT','EXPORT_GENERATED_PATTERN_MATCH','EXPORT_FILENAME_BLOCKED','EXPORT_PATH_REJECTED','EXPORT_LINK_REJECTED',
     'EXPORT_IDENTITY_FAILED','EXPORT_SNAPSHOT_CHANGED','EXPORT_INTEGRITY_FAILED','EXPORT_LIMIT_EXCEEDED',
     'EXPORT_METADATA_INVALID','EXPORT_PROGRESS_INVALID','EXPORT_CONFIGURATION_INVALID','EXPORT_UNEXPECTED_FAILURE')
   foreach ($line in $Text.Split("`n")) {
+    # Optional one-shot origin diagnosis;EP1/EF1 fields and guards stay unchanged.
+    if ($line.StartsWith('EO1|',[StringComparison]::Ordinal)) {
+      $origin = $line.TrimEnd("`r").Split('|')
+      if ($line.Length -gt 96 -or $origin.Count -ne 3 -or $originRecord -cne '' -or
+          $errorCode -cne '' -or $lastStatus -cne 'FAILED' -or
+          $origin[1] -cnotin @('COMPILED_RUNTIME','PACKAGE_METADATA','RUNTIME_DEPENDENCY',
+            'PLUGIN_OR_EXTENSION','ROOT_RUNTIME','GENERATED_CONTENT','OTHER_OR_UNKNOWN') -or
+          $origin[2] -cnotin @('PRIVATE_KEY_LIKE','GITHUB_TOKEN_LIKE','API_KEY_LIKE',
+            'AWS_ACCESS_KEY_LIKE','JWT_LIKE','BEARER_TOKEN_LIKE','OTHER_OR_UNKNOWN')) { throw 'Export origin schema' }
+      $originRecord = 'EO1|' + $origin[1] + '|' + $origin[2]
+      continue
+    }
     if ($line.StartsWith('EF1|',[StringComparison]::Ordinal)) {
       $failure = $line.TrimEnd("`r").Split('|')
       if ($line.Length -gt 96 -or $failure.Count -ne 2 -or $errorCode -cne '' -or
@@ -80,12 +93,18 @@ function Publish-ExportProgress([string]$Text,[bool]$RequireSuccess,[bool]$Timed
   }
   if (-not $TimedOut -and $ExitCode -ne 0 -and $errorCode -ceq '') { throw 'Export failure incomplete' }
   if ($lastStatus -ceq 'FAILED' -and -not $TimedOut -and $ExitCode -eq 0) { throw 'Export failure binding' }
+  if ($originRecord -cne '' -and ($TimedOut -or $ExitCode -eq 0 -or
+      $errorCode -cnotin @('EXPORT_CONTENT_PATTERN_MATCH','EXPORT_GENERATED_PATTERN_MATCH') -or
+      ($errorCode -ceq 'EXPORT_GENERATED_PATTERN_MATCH' -and -not $originRecord.StartsWith('EO1|GENERATED_CONTENT|')) -or
+      ($errorCode -ceq 'EXPORT_CONTENT_PATTERN_MATCH' -and $originRecord.StartsWith('EO1|GENERATED_CONTENT|')))) { throw 'Export origin binding' }
   $relayBytes = 0
+  if ($originRecord -cne '') { $relayBytes += $originRecord.Length + 1 }
   foreach ($record in $records) { $relayBytes += $record.Length + 1 }
   if ($errorCode -cne '') { $relayBytes += 5 + $errorCode.Length }
   if ($relayBytes -gt 32768) { throw 'Export progress cap' }
   # On timeout a RUNNING snapshot is useful;it cannot become a success receipt.
   foreach ($record in $records) { Write-Host $record }
+  if ($originRecord -cne '') { Write-Host $originRecord }
   if ($errorCode -cne '') { Write-Host ('EF1|' + $errorCode) }
   if ($RequireSuccess -and ($records.Count -eq 0 -or $lastStatus -cne 'SUCCEEDED')) { throw 'Export progress incomplete' }
 }

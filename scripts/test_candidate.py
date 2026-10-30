@@ -82,14 +82,54 @@ def safe_path(value):
     return '/'.join(parts)
 
 
-def sensitive(data):
-    # Pattern screening is intentionally incomplete; never emit matched bytes.
-    patterns = [rb'-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----',
+# Same predicates/order as the original scanner;family labels never contain data.
+SENSITIVE_PATTERNS = [rb'-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----',
                 rb'\bgh[pousr]_[A-Za-z0-9]{20,}', rb'\bgithub_pat_[A-Za-z0-9_]{20,}',
                 rb'\bsk-[A-Za-z0-9_-]{20,}', rb'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b',
                 rb'\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]+',
                 rb'(?i)authorization\s*:\s*bearer\s+[A-Za-z0-9._~+/-]{12,}']
-    return any(re.search(pattern, data) for pattern in patterns)
+PATTERN_FAMILIES = ('PRIVATE_KEY_LIKE', 'GITHUB_TOKEN_LIKE', 'GITHUB_TOKEN_LIKE',
+                    'API_KEY_LIKE', 'AWS_ACCESS_KEY_LIKE', 'JWT_LIKE', 'BEARER_TOKEN_LIKE')
+SOURCE_GROUPS = frozenset(('COMPILED_RUNTIME', 'PACKAGE_METADATA', 'RUNTIME_DEPENDENCY',
+                          'PLUGIN_OR_EXTENSION', 'ROOT_RUNTIME', 'GENERATED_CONTENT', 'OTHER_OR_UNKNOWN'))
+PATTERN_GROUPS = frozenset((*PATTERN_FAMILIES, 'OTHER_OR_UNKNOWN'))
+
+
+def sensitive(data):
+    # Pattern screening is intentionally incomplete; never emit matched bytes.
+    return any(re.search(pattern, data) for pattern in SENSITIVE_PATTERNS)
+
+
+def pattern_family(data):
+    # Only called after a rejection;no match object/bytes are retained or emitted.
+    for family, pattern in zip(PATTERN_FAMILIES, SENSITIVE_PATTERNS):
+        if re.search(pattern, data):
+            return family
+    return 'OTHER_OR_UNKNOWN'
+
+
+def source_group(rel):
+    # Lexical source-layout classification,not proof of authorship or runtime necessity.
+    # Metadata takes precedence;dependency nesting precedes plugin/dist categories.
+    if type(rel) is not str:
+        return 'OTHER_OR_UNKNOWN'
+    parts = rel.split('/')
+    if parts[-1] == 'package.json':
+        return 'PACKAGE_METADATA'
+    if 'node_modules' in parts:
+        return 'RUNTIME_DEPENDENCY'
+    if rel.startswith(('dist/extensions/', 'extensions/')):
+        return 'PLUGIN_OR_EXTENSION'
+    if rel.startswith('dist/'):
+        return 'COMPILED_RUNTIME'
+    if '/' not in rel and rel.endswith(('.js', '.mjs', '.cjs')):
+        return 'ROOT_RUNTIME'
+    return 'OTHER_OR_UNKNOWN'
+
+
+def content_origin(exc, data, rel=None, generated=False):
+    # Annotation only;original guard/exit remain authoritative.
+    exc.pattern_origin = ('GENERATED_CONTENT' if generated else source_group(rel), pattern_family(data))
 
 
 def native_owner(path, policy):
@@ -581,7 +621,11 @@ def prepare_runtime(source, destination, policy, progress=None):
             with os.fdopen(fd, 'rb') as stream:
                 data = stream.read(size + 1)
             need(len(data) == size, 'EXPORT_READ_LENGTH_MISMATCH')
-            need(not sensitive(data), 'EXPORT_CONTENT_PATTERN_MATCH')
+            try:
+                need(not sensitive(data), 'EXPORT_CONTENT_PATTERN_MATCH')
+            except Rejected as exc:
+                content_origin(exc, data, rel)
+                raise
             if progress is not None:
                 progress.add(readBytes=len(data))
             return data
@@ -884,7 +928,11 @@ def prepare_runtime(source, destination, policy, progress=None):
         for data in [projected_metadata, *generated.values()]:
             need(len(data) <= policy['maxFileBytes'], 'EXPORT_GENERATED_FILE_LIMIT')
             need(len(data) <= 32 * 1024 * 1024, 'EXPORT_GENERATED_METADATA_LIMIT')
-            need(not sensitive(data), 'EXPORT_GENERATED_PATTERN_MATCH')
+            try:
+                need(not sensitive(data), 'EXPORT_GENERATED_PATTERN_MATCH')
+            except Rejected as exc:
+                content_origin(exc, data, generated=True)
+                raise
         # No payload writes until selection,required edges and content checks all pass.
         if progress is not None:
             progress.set_phase('SNAPSHOT_COPY')
@@ -1655,6 +1703,12 @@ if __name__ == '__main__':
                     progress.finish('FAILED')
             except Exception:
                 code = 'EXPORT_UNEXPECTED_FAILURE'
+            origin = getattr(exc, 'pattern_origin', None) if type(exc) is Rejected else None
+            if (code in ('EXPORT_CONTENT_PATTERN_MATCH', 'EXPORT_GENERATED_PATTERN_MATCH') and
+                type(origin) is tuple and len(origin) == 2 and
+                type(origin[0]) is str and origin[0] in SOURCE_GROUPS and
+                type(origin[1]) is str and origin[1] in PATTERN_GROUPS):
+                print('EO1|' + origin[0] + '|' + origin[1], flush=True)
             print('EF1|' + code, flush=True)
             raise SystemExit(1)
     else:
