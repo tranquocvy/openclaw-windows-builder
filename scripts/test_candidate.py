@@ -22,6 +22,11 @@ EXPORT_FAILURE_GROUPS = {
     'EXPORT_WORKSPACE_SURFACE_UNKNOWN': ('EXPORT_WORKSPACE_SURFACE_UNKNOWN', 'EXPORT_WORKSPACE_GLOB_UNKNOWN'),
     'EXPORT_MISSING_DEPENDENCY': ('EXPORT_MISSING_DEPENDENCY',),
     'EXPORT_CONTENT_BLOCKED': ('EXPORT_CONTENT_BLOCKED',),
+    'EXPORT_READ_LENGTH_MISMATCH': ('EXPORT_READ_LENGTH_MISMATCH',),
+    'EXPORT_CONTENT_PATTERN_MATCH': ('EXPORT_CONTENT_PATTERN_MATCH',),
+    'EXPORT_GENERATED_FILE_LIMIT': ('EXPORT_GENERATED_FILE_LIMIT',),
+    'EXPORT_GENERATED_METADATA_LIMIT': ('EXPORT_GENERATED_METADATA_LIMIT',),
+    'EXPORT_GENERATED_PATTERN_MATCH': ('EXPORT_GENERATED_PATTERN_MATCH',),
     'EXPORT_FILENAME_BLOCKED': ('Forbidden export filename', 'FORBIDDEN_NAME'),
     'EXPORT_PATH_REJECTED': ('PATH', 'EXPORT_PATH_ESCAPE', 'EXPORT_PATH_CONTENT_BLOCKED', 'EXPORT_ROOT_ALIAS', 'EXPORT_CASE_COLLISION',
                              'EXPORT_LOCAL_VOLUME_REQUIRED', 'EXPORT_ROOTS', 'EXPORT_MANIFEST_PATH', 'EXPORT_MANIFEST_COLLISION'),
@@ -575,7 +580,8 @@ def prepare_runtime(source, destination, policy, progress=None):
             fd = msvcrt.open_osfhandle(duplicate.value, os.O_RDONLY | os.O_BINARY)
             with os.fdopen(fd, 'rb') as stream:
                 data = stream.read(size + 1)
-            need(len(data) == size and not sensitive(data), 'EXPORT_CONTENT_BLOCKED')
+            need(len(data) == size, 'EXPORT_READ_LENGTH_MISMATCH')
+            need(not sensitive(data), 'EXPORT_CONTENT_PATTERN_MATCH')
             if progress is not None:
                 progress.add(readBytes=len(data))
             return data
@@ -875,9 +881,10 @@ def prepare_runtime(source, destination, policy, progress=None):
         total += len(projected_metadata) - len(source_metadata) + sum(map(len, generated.values()))
         need(total <= policy['maxExpandedBytes'] and len(files) + len(aliases) + len(generated) <
              policy['maxEntries'], 'EXPORT_CAP')
-        need(all(len(data) <= policy['maxFileBytes'] and len(data) <= 32 * 1024 * 1024 and
-                 not sensitive(data) for data in [projected_metadata, *generated.values()]),
-             'EXPORT_CONTENT_BLOCKED')
+        for data in [projected_metadata, *generated.values()]:
+            need(len(data) <= policy['maxFileBytes'], 'EXPORT_GENERATED_FILE_LIMIT')
+            need(len(data) <= 32 * 1024 * 1024, 'EXPORT_GENERATED_METADATA_LIMIT')
+            need(not sensitive(data), 'EXPORT_GENERATED_PATTERN_MATCH')
         # No payload writes until selection,required edges and content checks all pass.
         if progress is not None:
             progress.set_phase('SNAPSHOT_COPY')
@@ -1022,7 +1029,7 @@ def test_runtime_export():
             lambda o,s,d,p,n=filename:p('dist/'+n,'// synthetic benign body'),
             'Forbidden export filename'))
     reports.append(run('credential-like-content',
-        lambda o,s,d,p:p('dist/canary.txt',fake_canary),'EXPORT_CONTENT_BLOCKED'))
+        lambda o,s,d,p:p('dist/canary.txt',fake_canary),'EXPORT_CONTENT_PATTERN_MATCH'))
     reports.append(run('credential-like-path',
         lambda o,s,d,p:p('dist/'+fake_canary.decode(),'// synthetic'),
         'EXPORT_PATH_CONTENT_BLOCKED'))
